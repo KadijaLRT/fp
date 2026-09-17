@@ -560,3 +560,44 @@ there's no retry if it fails, which is a real if narrow gap worth
 knowing about), a dead no-op ternary in `optimize.js`, and a comment
 typo.
 
+## Multiple screenshot upload (large routes, 50+ stops)
+
+A single Flex itinerary screenshot only shows ~15-20 stops before
+scrolling, so a 55-stop route needs several images — `ItineraryUpload.jsx`
+now accepts multiple files at once (`multiple` on the file input) and
+processes each through `/api/ocr` independently (limited concurrency, 3 at
+a time, reusing the same worker-pool pattern as `geocodeAddressBatch`),
+then merges every successfully-scanned screenshot's stops into one
+itinerary, renumbered sequentially in upload order.
+
+Deliberately **not** all-or-nothing: if one screenshot in a batch fails
+OCR, the others still succeed and merge normally — the failed one gets
+its own retry / text-scan / manual-entry recovery options inline, so a
+single bad photo doesn't cost you the rest of an otherwise-successful
+50-stop import. Confirming a manual/text-scan recovery for a failed item
+merges it back into the batch as a normal success, going through the same
+"Continue with N stops" step as everything else.
+
+**Known limitation, stated plainly rather than silently handled:** the
+merge trusts upload order as the best available signal for overall stop
+sequence (each screenshot's own OCR'd `stopNumber` restarts at 1 and has
+no idea it's part of a larger set, so it's ignored in favor of sequential
+renumbering after merge). This matters less than it might sound: actual
+delivery order is decided by the route optimizer from real coordinates,
+not by this initial numbering. What merge order can't detect is
+**overlapping screenshots** — if two images both captured some of the
+same stops (overlapping scroll positions), those stops appear twice in
+the merged list. Worth a glance at the total count against what the Flex
+app shows before starting the route; no automatic dedup is attempted,
+since two genuinely different stops can look very similar (same street,
+different unit) and a false-positive removal is worse than a rare
+duplicate.
+
+Verified directly: a 3-screenshot / 55-stop merge (including one
+screenshot failing) produces exactly 55 correctly-renumbered stops in the
+right order with no duplicate numbers, and the full 55-stop set was run
+through `api/optimize.js`'s chunked-matrix path end-to-end (55 > 25,
+so this exercises the tiling logic, not the single-request fast path) —
+55 stops back, no duplicates or missing entries, in under 30ms against a
+mocked Mapbox response.
+
