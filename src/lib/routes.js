@@ -15,7 +15,7 @@ import { supabase } from './supabaseClient';
  * callers can check and move on.
  */
 
-export async function createRoute({ driverId, totalStops, totalPackages, strategyUsed, estDurationSeconds }) {
+export async function createRoute({ driverId, totalStops, totalPackages, strategyUsed, estDurationSeconds, blockPayCents }) {
   if (!supabase || !driverId) return null;
 
   try {
@@ -28,6 +28,7 @@ export async function createRoute({ driverId, totalStops, totalPackages, strateg
         total_packages: totalPackages,
         strategy_used: strategyUsed,
         est_duration_seconds: estDurationSeconds ?? null,
+        block_pay_cents: typeof blockPayCents === 'number' && blockPayCents >= 0 ? Math.round(blockPayCents) : null,
         started_at: new Date().toISOString()
       })
       .select('id')
@@ -60,6 +61,7 @@ export async function createRouteStops(routeId, stops) {
       location_id: stop.locationId || null,
       sequence_order: idx,
       package_count: stop.packageCount || 1,
+      vehicle_zone: stop.vehicleZone || null,
       delivery_window_end: stop.deliveryWindowEnd || null,
       status: 'pending'
     }));
@@ -90,6 +92,45 @@ export async function createRouteStops(routeId, stops) {
  * update_location_intelligence trigger — this is the one write in the
  * whole app that feeds the learning loop.
  */
+/**
+ * Sets/updates which part of the vehicle a stop's package(s) were loaded
+ * into. Manual-only (see schema.sql comment) — never inferred, since
+ * nothing in the OCR/geocoding pipeline has a source for this data.
+ */
+export async function updateVehicleZone(routeStopId, zone) {
+  if (!supabase || !routeStopId) return false;
+  const validZones = ['front_seat', 'driver_rear', 'passenger_rear', 'trunk_left', 'trunk_right', 'trunk_center'];
+  if (zone !== null && !validZones.includes(zone)) return false;
+
+  try {
+    const { error } = await supabase.from('route_stops').update({ vehicle_zone: zone }).eq('id', routeStopId);
+    if (error) throw error;
+    return true;
+  } catch (err) {
+    console.error('updateVehicleZone failed (non-fatal):', err);
+    return false;
+  }
+}
+
+/**
+ * Sets/updates a route's block pay after creation — covers the case where
+ * a driver skips entering it up front but adds it mid-block via the
+ * PayRateBanner's "+ Add pay" prompt.
+ */
+export async function updateBlockPay(routeId, blockPayCents) {
+  if (!supabase || !routeId) return false;
+  if (typeof blockPayCents !== 'number' || blockPayCents < 0) return false;
+
+  try {
+    const { error } = await supabase.from('routes').update({ block_pay_cents: Math.round(blockPayCents) }).eq('id', routeId);
+    if (error) throw error;
+    return true;
+  } catch (err) {
+    console.error('updateBlockPay failed (non-fatal):', err);
+    return false;
+  }
+}
+
 export async function finalizeRouteStop(routeStopId, { status, totalStopSeconds }) {
   if (!supabase || !routeStopId) return false;
   if (!['completed', 'skipped', 'failed'].includes(status)) return false;

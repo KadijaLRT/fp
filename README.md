@@ -150,7 +150,200 @@ Verified: the delivery-window parser against 9 realistic OCR strings
 harness used for the earlier 2-opt verification, confirming no regression
 in route quality or integrity.
 
-## Project structure
+## Roadmap features added
+
+A later roadmap review requested several new features. Implemented in this
+pass, in order:
+
+- **Rate limiting** (`api/_rateLimit.js`) — sliding-window limits on
+  `/api/ocr`, `/api/optimize`, `/api/explain-route` via Upstash Redis
+  (10/20/20 requests per minute per caller IP). Fails **open** — both when
+  Upstash isn't configured and when it's configured but unreachable — since
+  a rate limiter outage should never be able to take down the whole app.
+  Set `UPSTASH_REDIS_REST_URL`/`UPSTASH_REDIS_REST_TOKEN` before production
+  traffic; without them, these endpoints have no request ceiling.
+- **OCR fallback pipeline** — when Groq vision OCR fails, the driver gets
+  two fallback paths instead of a dead end: a client-side Tesseract.js
+  re-scan of the same image (dynamically imported, code-split into its own
+  chunk so sessions that never need it don't pay the bundle cost), or fully
+  manual entry. Both land in `ManualStopReview.jsx`, a mandatory edit
+  screen — heuristically-extracted or hand-typed data is never trusted the
+  way Groq's structured JSON output is.
+- **Package/trunk zone tagging** — `route_stops.vehicle_zone` (schema +
+  `updateVehicleZone()` + quick-tap chips on `ActiveStopCard`). This is
+  manual-only: Flex itinerary screenshots have no source data for where a
+  package physically is in the vehicle, so there was nothing for OCR to
+  extract — a driver taps a zone when they load the vehicle.
+- **Gate-code freshness badge** — `fetchApartmentIntelPreview()` surfaces
+  whether crowd-sourced apartment intel exists for a stop and how old it
+  is ("5d ago", "2mo ago") directly on `ActiveStopCard`, tappable straight
+  into the editor, instead of the driver having to open the editor blind
+  to find out if anything's there.
+- **Battery/thermal guard mode** — an OLED true-black toggle
+  (localStorage-persisted device preference, `bg-black` instead of
+  `bg-slate-900`), plus an *honestly scoped* version of "adaptive GPS
+  polling": a web app cannot tell a phone's GPS chip to sample at a
+  different hardware rate — what it can control is how often it *acts* on
+  incoming fixes. Updates are throttled to once per 15s when the driver is
+  both far from the current stop (>0.2mi) and moving at highway speed
+  (>30mph), and applied immediately otherwise, since that's where geofence
+  accuracy actually matters.
+- **Offline-first engine** — `src/lib/offlineStore.js` (IndexedDB
+  wrapper — **note:** IndexedDB doesn't exist in a Node sandbox, so unlike
+  everything else in this project this module could not be exercised with
+  an actual runtime test, only carefully hand-reviewed; treat it with more
+  scrutiny until it's run on a real device) caches the current route and
+  queues writes that fail while offline for replay on reconnect.
+  `src/utils/offlineSolver.js` is a local nearest-neighbor + 2-opt fallback
+  using straight-line distance (verified: 12 randomized trials, route
+  integrity confirmed, consistently beats nearest-neighbor-only, same
+  methodology as the server solver's earlier verification) for when the
+  network is unreachable. This surfaced a second gap while building it:
+  **"🔥 REOPTIMIZE" was named in this project's original system prompt but
+  never actually implemented** — added now as `handleReoptimize` in
+  `App.jsx`, re-sequencing only the remaining (not-yet-completed) stops,
+  using the server solver when online and falling back to the offline
+  solver when not.
+
+### Explicitly not implemented — flagged rather than faked
+
+- **Right-side/curb delivery bias.** True side-of-street routing needs
+  Mapbox's Directions API with per-leg `approaches` parameters, not the
+  Matrix API this app uses for TSP costing. Building a "looks like it
+  works" heuristic (e.g. comparing route bearing to a stop's offset) would
+  give false confidence about a safety-adjacent feature — avoiding
+  dangerous left turns across traffic — without it actually being
+  verified to work. This needs a real Directions API integration, which is
+  a separate scope of work, not a quick addition to the existing solver.
+- **Package barcode scan / weather-aware buffers** — not yet built in this
+  pass; see the roadmap conversation for scoping notes (barcode scanning
+  via the `BarcodeDetector` Web API is Chrome/Android-only, no Safari/iOS
+  support — worth confirming that's acceptable before building around it;
+  weather buffers need a provider decision, Open-Meteo requires no API key
+  and is a reasonable default).
+
+## Follow-up fixes: offline restore, zone suggestions, night-driving theme
+
+Three specific asks led to finding and fixing real gaps rather than just
+adding the features literally as described:
+
+1. **Offline cache now actually restores, and had a real bug.** The cache
+   was write-only — nothing ever read it back, so an app kill/reload while
+   offline (the exact rural-dead-zone scenario this exists for) lost the
+   driver's progress entirely. Also found and fixed a stale-closure bug:
+   `cacheRouteOffline` was reading the `currentRouteId` **state** variable
+   immediately after calling `setCurrentRouteId()` in the same function —
+   React state updates aren't synchronous, so every route after the first
+   in a session was caching under the *previous* route's id. Fixed by
+   using the locally-scoped id instead. The cache now also updates as the
+   driver progresses (not just at import), stores enough metadata for a
+   faithful resume (`currentIndex`, `routeStartedAtMs`,
+   `routeEstDurationSeconds`), and offers an explicit Resume/Discard
+   prompt on mount rather than silently reappearing — a route from days
+   ago shouldn't resume without being asked.
+2. **Package zone tagging is a deterministic suggestion, not an OCR
+   feature.** A Flex itinerary screenshot has no visual data about where a
+   package sits in the vehicle — there's nothing for Groq's vision model to
+   read. `src/utils/vehicleZoneSuggester.js` instead auto-suggests a zone
+   per stop based on route position (early stops → easy-reach zones, later
+   stops → deeper trunk), which is more reliable and instant/free compared
+   to asking an LLM to guess with no image of the actual vehicle. Verified
+   directly: zone distribution across a 30-stop route, edge cases (empty/
+   short routes), and confirmed it never overwrites a zone the driver
+   already set manually.
+3. **`ActiveStopCard` was never actually dark-themed.** The OLED toggle
+   only ever changed the app shell (header/background) — the stop card
+   itself, which is what's on screen almost the entire time a driver is
+   working a route, was a bright white card with black text regardless of
+   the toggle. That's a real glare issue for night driving, not just a
+   missing feature — fixed by making the card dark by default (not gated
+   behind the toggle, since a blinding white card was never the right
+   default for an app used mostly at night/dawn/dusk), with all badge
+   colors converted to dark-appropriate contrast and larger text for the
+   address/timer for at-a-glance readability while driving. Note: the
+   upload screen, manual-entry review, and apartment-intel editor are
+   still light-themed — only the active navigation view (what's on screen
+   while actually driving) was in scope here.
+
+## Live $/hr pace tracking
+
+Added after a priority conversation about low-block-volume drivers (1-2
+Flex blocks/week) needing every block to count — the app previously
+optimized purely for time, with no dollar figure anywhere. Since block pay
+is fixed once accepted, minimizing time is a reasonable proxy for
+maximizing $/hr, but there was no way to actually *see* the real pace
+while driving, or compare across the rare blocks a low-volume driver gets.
+
+- **`routes.block_pay_cents`** (schema) — manual entry only. Amazon's
+  block-offer screen (where pay is shown) is a different screen than the
+  itinerary/stop-list screenshot this app OCRs, so there's no source for
+  this in the parsed image.
+- **`BlockPayPrompt.jsx`** — a lightweight modal shown right after a route
+  is optimized, asking what the block pays (skippable, addable later via
+  the pace banner).
+- **`PayRateBanner.jsx`** — a self-ticking (own 1s interval, doesn't force
+  the whole app to re-render) live pace display: `$XX.XX/hr`, color-coded
+  against rough Flex pay benchmarks (≥$25/hr green, ≥$15/hr amber, below
+  red) so it's meaningful at a glance rather than a raw number the driver
+  has to judge. Deliberately withholds the rate for the first 60 seconds
+  of a block — dividing a fixed pay by a few seconds of elapsed time
+  produces a wildly inflated, meaningless figure. Verified: the underlying
+  math directly, and all four render states (inactive, no-pay-set,
+  too-early-to-show, correct calculation) via SSR rendering.
+- Route completion now shows the final $/hr achieved for the block, not
+  just a generic "done" message.
+
+**Bug caught while wiring this in:** `routeStartedAtMs` (which the pace
+banner depends on) was previously only ever set *inside* the
+Supabase-persistence code path — meaning if Supabase wasn't configured,
+the route clock never started and the pace banner would silently never
+appear at all, despite live pace tracking having no actual dependency on
+a backend. Fixed by starting the clock unconditionally and making DB
+persistence a separate, independent concern.
+
+**`src/utils/payRate.js`** now holds the shared rate-formatting/color
+logic so `PayRateBanner` and `OfferComparator` (below) can't quietly drift
+into disagreeing about what counts as a "good" rate.
+
+## Offer Comparator — pre-accept decision helper
+
+Added after a screenshot of an actual Flex Offers screen showing two
+available blocks ($57.50 / 2.5hr and $121 / 3.5hr) prompted the
+observation that Amazon's own app already displays pay and duration for
+every offer — it just doesn't do the $/hr arithmetic for you in the few
+seconds you have to decide. `OfferComparator.jsx` is a small modal
+(reachable from the idle/upload screen, independent of any active route)
+where you enter pay + duration for each offer you're considering and it
+instantly ranks them by $/hr, highlighting the best one.
+
+**This is pure arithmetic on numbers Amazon's own UI already shows you —
+it does not read from, poll, or interact with Amazon's systems in any
+way.** That distinction matters: automating the *catching* of blocks
+(polling faster than a human, auto-accepting) is a ToS violation and
+something this project has explicitly declined to build; helping a human
+do arithmetic on what they can already see with their own eyes is a
+different thing entirely.
+
+Verified against the exact figures from the screenshot that prompted this
+(Windsor CT $57.50/2.5hr → $23.00/hr amber; Glastonbury $121/3.5hr →
+$34.57/hr green — confirming the less-obvious "bigger dollar number"
+offer is actually the better one), plus edge cases (zero duration, missing
+pay) degrading to `null`/`--` rather than crashing on `NaN`/`Infinity`.
+
+### Preferred stations
+
+`src/lib/preferredStations.js` (localStorage-backed, device-local like
+`batterySaverMode`) powers quick-select chips in the Offer Comparator so a
+driver who only ever works a handful of stations doesn't retype them
+every time. Seeded once, on first use, with whatever stations the driver
+has told the app about — never overwrites a list the driver has already
+customized via the Edit toggle. Verified directly with a localStorage
+shim: seeding, deduplication (adding the same station twice doesn't
+double up), removal, and input sanitization (trims whitespace, drops
+empty entries) all behave correctly, plus confirmed via rendered output
+that the chips actually appear on first use.
+
+
 
 ```
 api/                   Vercel serverless functions (OCR, optimize, explain-route)
@@ -159,3 +352,105 @@ src/utils/              geocoder, navigation deep-linking
 src/lib/                supabaseClient, auth helpers
 supabase/schema.sql     DB schema, trigger, RLS policies
 ```
+
+## "Must finish by" deadline warning
+
+Added after context about a hard time constraint (needing to be done and
+home before a school-morning routine) explaining a preference for very
+early blocks. `src/utils/deadlineProjection.js` is the pure logic —
+verified with 11 direct assertions before any UI was built on top of it,
+including the pace-extrapolation math, deadline-string parsing, and all
+three status boundaries (comfortable/tight/late).
+
+- **`DeadlinePrompt.jsx`** — optional, skippable modal to set a "need to
+  be done by" time, same pattern as `BlockPayPrompt`.
+- **`DeadlineBanner.jsx`** — self-ticking (own 1s interval) live
+  projection: "⏰ on pace — finishing ~7:52 AM" vs "cutting it close" vs
+  "running late", color-coded. Before any stops are completed, the
+  projection falls back to the optimizer's pure-driving-time estimate
+  (which understates real time — no per-stop service time included — so it
+  reads as optimistic, not authoritative); once stops start completing, it
+  extrapolates from actual pace-so-far instead, which is more honest but
+  still just a linear extrapolation, not a promise. Verified via rendered
+  output using a scenario matching the described situation (3am start,
+  4/20 stops after 1 hour, 8:30am deadline).
+
+Reset alongside `blockPayCents` at the same three points (new route
+imported, route completed, route abandoned) so a deadline from a previous
+block never silently carries over to a new one.
+
+### Deadline checking added to the Offer Comparator too
+
+Extended so the same "would this get me done in time" check works
+*before* accepting a block, not just during one — the Offers screen shows
+each offer's start time and duration, so finish time is computable from
+information already on screen, same as the $/hr math.
+
+- **`src/lib/driverDeadline.js`** — the deadline is now a saved *standing*
+  preference ("need to be done by 8:30") rather than something re-entered
+  per block, since for a driver with a fixed daily constraint that's the
+  more honest model. `DeadlinePrompt` now pre-fills from it and saves back
+  to it; `OfferComparator` pre-fills its own deadline field from the same
+  source.
+- Each offer row in `OfferComparator` now has a **Starts** time field;
+  once both a deadline and a start time are entered, a status pill appears
+  per offer — ✅ comfortable, ⚠️ tight, ❌ finishes after your deadline —
+  reusing the same verified `assessDeadlineStatus`/`parseDeadlineToday`
+  logic as the in-route banner, so the two features can't disagree about
+  what "tight" means.
+
+Verified directly against the actual offers from the screenshot that
+prompted the $/hr feature: with an 8:30am deadline, both the Windsor
+(3:45-6:15) and Glastonbury (3:15-6:45) blocks correctly show
+"comfortable" (hours of buffer), and a hypothetical later block
+(6:00-9:30) correctly flags as "late" against the same deadline —
+confirming the boundary actually triggers, not just the easy case.
+
+## Schema fix: re-running `schema.sql` no longer errors
+
+Caught from a screenshot of a real Supabase SQL editor run against
+production: `ERROR 42710: constraint "chk_locations_lat_range" ... already
+exists`. Postgres has no `ADD CONSTRAINT IF NOT EXISTS`, and the SQL
+editor runs a script's statements in order — so re-running `schema.sql`
+against a database that already had these constraints (from an earlier
+run) failed partway through and left everything after that point
+un-applied, silently. `CREATE POLICY` has the same limitation and would
+have hit the identical error on the very next statement once the first
+was fixed.
+
+Fixed throughout: every `ADD CONSTRAINT` is now preceded by a
+`DROP CONSTRAINT IF EXISTS` for the same name, and every `CREATE POLICY`
+by a `DROP POLICY IF EXISTS` — both are the standard idempotent pattern
+for objects Postgres doesn't support `IF NOT EXISTS` on directly. Verified
+mechanically, not just by eye: every drop/recreate pair's name matches
+exactly (16 constraints, 16 policies, checked programmatically against
+the actual file rather than assumed from the edit). The file is now safe
+to run any number of times — first time or fiftieth, on an empty database
+or one that already has everything from a prior partial run.
+
+**Follow-up fix, same root cause, a different symptom.** After the fix
+above, re-running the file against production hit
+`ERROR 42703: column "vehicle_zone" does not exist`. `CREATE TABLE IF NOT
+EXISTS` is a no-op once a table exists — so a column added to a table's
+*definition* in a later revision of this file than the one that first
+created that table never actually reached the real database; it only
+existed in the file. `vehicle_zone` (added for package-zone tagging) and
+`block_pay_cents` (added for pay-rate tracking) were the two casualties,
+but rather than patch just those two, every nullable column across all
+five tables now has an `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` right
+after its `CREATE TABLE IF NOT EXISTS`, converging any existing table
+(however old) to the current full definition regardless of which
+historical version first created it. The handful of `NOT NULL`-with-no-
+`DEFAULT` columns (`email`, `total_stops`, `formatted_address`,
+`latitude`, `longitude`, `sequence_order`) are deliberately left alone,
+since they were part of every version of this schema from the start, and
+retroactively adding a `NOT NULL` column with no default to a table that
+may already have rows would itself fail.
+
+Verified with a per-table script comparing each `CREATE TABLE`'s column
+list against its `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` list: every
+column matches with zero typos, zero columns attached to the wrong table,
+and the only "missing" ones are exactly the six intentionally-excluded
+`NOT NULL` columns listed above — confirmed programmatically, not
+eyeballed.
+

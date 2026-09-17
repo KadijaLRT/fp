@@ -102,3 +102,37 @@ export async function fetchLocationIntelligence(locationIds) {
     return {};
   }
 }
+
+/**
+ * Fetches a lightweight preview of crowd-sourced apartment intel (whether a
+ * gate code exists, and how stale it is) for a set of location ids, so
+ * ActiveStopCard can show a "gate code available" badge without the driver
+ * having to open the full editor to find out. Freshness matters here more
+ * than for most cached data — a gate code from 8 months ago carries real
+ * risk of being wrong (complexes change codes), so this surfaces age
+ * rather than just presence/absence, letting the driver judge trust for
+ * themselves instead of the app silently treating all ages as equally
+ * reliable.
+ */
+export async function fetchApartmentIntelPreview(locationIds) {
+  if (!supabase || !Array.isArray(locationIds) || locationIds.length === 0) {
+    return {};
+  }
+  try {
+    const { data, error } = await supabase
+      .from('apartment_profiles')
+      .select('location_id, gate_code, updated_at')
+      .in('location_id', locationIds);
+
+    if (error) throw error;
+
+    return Object.fromEntries(
+      (data || [])
+        .filter((row) => row.gate_code)
+        .map((row) => [row.location_id, { updatedAt: row.updated_at }])
+    );
+  } catch (err) {
+    console.error('fetchApartmentIntelPreview failed:', err);
+    return {};
+  }
+}
