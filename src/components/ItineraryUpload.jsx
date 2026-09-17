@@ -166,22 +166,21 @@ export default function ItineraryUpload({ onRouteImported }) {
         <span className="text-4xl mb-3" aria-hidden="true">📸</span>
         <h2 className="text-lg font-bold text-gray-800">Upload Flex Itinerary</h2>
         <p className="text-xs text-gray-500 mt-1 mb-4">
-          Take a screenshot of your stop list and drop it here.
+          Choose the screenshot of your stop list from your photos.
         </p>
 
         <label className="cursor-pointer bg-blue-600 text-white text-sm font-semibold py-3 px-6 rounded-xl shadow-md active:scale-95 transition-all min-h-[48px] flex items-center justify-center">
-          {loading ? 'Processing OCR…' : 'Take or Choose Screenshot'}
+          {loading ? 'Processing OCR…' : 'Choose Screenshot'}
           <input
             type="file"
             accept="image/png,image/jpeg,image/webp,image/heic,image/heif"
-            capture="environment"
             onChange={handleFileUpload}
             disabled={loading || fallbackMode === 'scanning'}
             className="hidden"
           />
         </label>
         <p className="text-[11px] text-gray-400 mt-2">
-          Opens your camera by default on most phones — you can still pick an existing photo from your library instead.
+          Opens your photo library — most Flex itineraries are screenshots you already have saved, not something to photograph live.
         </p>
 
         {fallbackMode === 'scanning' && (

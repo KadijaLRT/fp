@@ -45,7 +45,15 @@ export default function ActiveStopCard({
   const [seconds, setSeconds] = useState(0);
   const [isTimerRunning, setIsTimerRunning] = useState(true);
   const [navError, setNavError] = useState(null);
+  const [actionPending, setActionPending] = useState(false);
   const intervalRef = useRef(null);
+  // Synchronous lock, separate from actionPending state: a state update
+  // isn't visible until the next render, so two click events dispatched
+  // within the same tick (duplicate touch events, a very fast double-tap)
+  // could both read actionPending as false and both fire. A ref mutates
+  // immediately, so the second call sees the lock the first call just set,
+  // even before React has re-rendered anything.
+  const actionLockRef = useRef(false);
 
   useEffect(() => {
     if (isTimerRunning) {
@@ -66,6 +74,8 @@ export default function ActiveStopCard({
     setSeconds(0);
     setIsTimerRunning(true);
     setNavError(null);
+    setActionPending(false);
+    actionLockRef.current = false;
   }, [currentStop?.id]);
 
   const formatTime = (totalSec) => {
@@ -85,7 +95,17 @@ export default function ActiveStopCard({
     }
   };
 
+  // Double-tap safeguard: this project's own hardening checklist calls out
+  // "✓ DELIVERED" by name as a button that needs an execution lock during
+  // pending state — without one, two taps (or a duplicate touch event,
+  // which real touchscreens do send) before the stop actually changes both
+  // fire onCompleteStop, and since App.jsx's currentIndex advance uses the
+  // functional setState form, both calls genuinely apply: the route
+  // silently skips a stop the driver never saw or acted on.
   const handleDone = () => {
+    if (actionLockRef.current) return;
+    actionLockRef.current = true;
+    setActionPending(true);
     setIsTimerRunning(false);
     onCompleteStop?.({
       stopId: currentStop.id,
@@ -94,6 +114,9 @@ export default function ActiveStopCard({
   };
 
   const handleSkip = () => {
+    if (actionLockRef.current) return;
+    actionLockRef.current = true;
+    setActionPending(true);
     onSkipStop?.(currentStop);
   };
 
@@ -249,15 +272,17 @@ export default function ActiveStopCard({
           <div className="grid grid-cols-2 gap-2 pt-1">
             <button
               onClick={handleDone}
-              className={`bg-emerald-600 hover:bg-emerald-700 active:scale-98 text-white font-bold py-3 rounded-xl shadow transition-all min-h-[48px] ${
+              disabled={actionPending}
+              className={`bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 active:scale-98 text-white font-bold py-3 rounded-xl shadow transition-all min-h-[48px] ${
                 proximity?.arrived ? 'ring-4 ring-emerald-400' : ''
               }`}
             >
-              ✓ DELIVERED
+              {actionPending ? 'Saving…' : '✓ DELIVERED'}
             </button>
             <button
               onClick={handleSkip}
-              className="bg-slate-700 hover:bg-slate-600 text-slate-200 font-semibold py-3 rounded-xl transition-all min-h-[48px]"
+              disabled={actionPending}
+              className="bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-slate-200 font-semibold py-3 rounded-xl transition-all min-h-[48px]"
             >
               ⏭️ SKIP
             </button>

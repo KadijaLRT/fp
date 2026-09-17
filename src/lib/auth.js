@@ -31,8 +31,13 @@ export async function signUpWithEmail(email, password, fullName) {
     });
     if (error) return { data: null, error };
 
-    // Mirror the driver into our own drivers table (id matches auth.users.id
-    // via a Supabase trigger in production; here we upsert defensively too).
+    // Mirror the driver into our own drivers table. This is the ONLY
+    // mechanism that creates that row — there is no server-side trigger
+    // backstopping it, and signInWithEmail below does not retry this. If
+    // this upsert fails (e.g. a network drop right after signUp succeeds),
+    // the auth account exists but the drivers row doesn't, and nothing
+    // will create it later — anything scoped by the drivers FK (routes,
+    // route_stops) will fail for that account until it's created manually.
     if (data?.user?.id) {
       await supabase.from('drivers').upsert(
         {

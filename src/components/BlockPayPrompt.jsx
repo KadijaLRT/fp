@@ -30,7 +30,7 @@ export default function BlockPayPrompt({ initialDollars, onSave, onSkip }) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
-      <div className="bg-slate-800 w-full sm:max-w-sm sm:rounded-2xl rounded-t-2xl p-5">
+      <div className="bg-slate-800 w-full sm:max-w-sm sm:rounded-2xl rounded-t-2xl px-5 pt-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))]">
         <h2 className="text-lg font-bold text-slate-50 mb-1">What's this block paying?</h2>
         <p className="text-xs text-slate-400 mb-4">
           Optional — lets the app show your live $/hr pace while you drive.

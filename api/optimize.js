@@ -81,9 +81,11 @@ async function fetchMatrixBlock(stops, sourceIdxs, destIdxs, mapboxToken) {
   const combinedIdxs = sameBlock ? sourceIdxs : [...sourceIdxs, ...destIdxs];
   const coordinatesStr = combinedIdxs.map((idx) => `${stops[idx].lng},${stops[idx].lat}`).join(';');
 
-  const sourcesParam = sameBlock
-    ? sourceIdxs.map((_, i) => i).join(';')
-    : sourceIdxs.map((_, i) => i).join(';');
+  // Sources always occupy positions 0..sourceIdxs.length-1 in the combined
+  // coordinate list, whether or not this is a same-block query — no need
+  // to branch on sameBlock here (a previous version had a no-op ternary
+  // computing the identical expression in both arms).
+  const sourcesParam = sourceIdxs.map((_, i) => i).join(';');
   const destParam = sameBlock
     ? destIdxs.map((_, i) => i).join(';')
     : destIdxs.map((_, i) => sourceIdxs.length + i).join(';');

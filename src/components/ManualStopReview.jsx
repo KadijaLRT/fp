@@ -1,6 +1,18 @@
 import React, { useState } from 'react';
 import { emptyStop } from '../utils/ocrTextParser';
 
+let nextKey = 1;
+
+// Bug fix: React `key` used to be the array index, which is a known
+// anti-pattern — removing a stop from the middle shifts every subsequent
+// item's key, and React can visually move focus to the wrong row as a
+// result (harmless to the underlying data here since every field is
+// fully controlled, but a real rough edge). Tagging each stop with a
+// stable synthetic key at creation time fixes it properly.
+function withKey(stop) {
+  return { ...stop, _key: nextKey++ };
+}
+
 /**
  * Shown whenever stop data didn't come from a trusted source (Groq vision
  * OCR) — either a Tesseract.js fallback scan or fully manual entry. Every
@@ -10,8 +22,8 @@ import { emptyStop } from '../utils/ocrTextParser';
  * structured JSON output has.
  */
 export default function ManualStopReview({ initialStops, onConfirm, onCancel }) {
-  const [stops, setStops] = useState(
-    initialStops && initialStops.length > 0 ? initialStops : [emptyStop(1)]
+  const [stops, setStops] = useState(() =>
+    (initialStops && initialStops.length > 0 ? initialStops : [emptyStop(1)]).map(withKey)
   );
   const [error, setError] = useState(null);
 
@@ -20,7 +32,7 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
   };
 
   const addStop = () => {
-    setStops((prev) => [...prev, emptyStop(prev.length + 1)]);
+    setStops((prev) => [...prev, withKey(emptyStop(prev.length + 1))]);
   };
 
   const removeStop = (idx) => {
@@ -28,7 +40,10 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
   };
 
   const handleConfirm = () => {
-    const trimmed = stops.map((s) => ({ ...s, address: (s.address || '').trim() }));
+    const trimmed = stops.map((s) => {
+      const { _key, ...rest } = s;
+      return { ...rest, address: (s.address || '').trim() };
+    });
     const validStops = trimmed.filter((s) => s.address.length > 0);
 
     if (validStops.length === 0) {
@@ -52,7 +67,7 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
 
       <div className="space-y-3">
         {stops.map((stop, idx) => (
-          <div key={idx} className="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+          <div key={stop._key} className="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
             <div className="flex justify-between items-center mb-2">
               <span className="text-xs font-bold text-gray-500 uppercase">Stop {idx + 1}</span>
               {stops.length > 1 && (

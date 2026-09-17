@@ -193,7 +193,18 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
 BEGIN
-    IF NEW.status = 'completed' AND NEW.total_stop_seconds IS NOT NULL THEN
+    -- Guard against double-counting: this trigger fires on every UPDATE to
+    -- route_stops, not just the moment a stop first becomes completed. The
+    -- original condition only checked NEW.status, so if finalizeRouteStop()
+    -- is ever called twice for the same row with status='completed' — a
+    -- double-tapped DELIVERED button, or the offline-write-queue replaying
+    -- a write that had actually already succeeded — this would fire again
+    -- and silently double-count that delivery into the location's learned
+    -- average. Comparing against OLD.status ensures the aggregate only
+    -- updates on a genuine transition into 'completed', making repeated
+    -- updates to an already-completed row a no-op here.
+    IF NEW.status = 'completed' AND NEW.total_stop_seconds IS NOT NULL
+       AND (OLD.status IS DISTINCT FROM 'completed') THEN
         UPDATE locations
         SET
             avg_total_stop_seconds = (

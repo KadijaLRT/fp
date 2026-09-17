@@ -122,7 +122,7 @@ export default function OfferComparator({ onClose }) {
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50">
-      <div className="bg-slate-800 w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl p-5 max-h-[90vh] overflow-y-auto">
+      <div className="bg-slate-800 w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl px-5 pt-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] max-h-[90vh] overflow-y-auto">
         <div className="flex justify-between items-center mb-1">
           <h2 className="text-lg font-bold text-slate-50">📊 Compare Offers</h2>
           <button onClick={onClose} className="text-slate-400 text-2xl leading-none px-2 min-h-[48px] min-w-[48px]" aria-label="Close">

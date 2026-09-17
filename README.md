@@ -454,3 +454,109 @@ and the only "missing" ones are exactly the six intentionally-excluded
 `NOT NULL` columns listed above — confirmed programmatically, not
 eyeballed.
 
+## Safe-area fix: header was rendering under the status bar
+
+Caught from a screenshot: the "FLEX ROUTE OPTIMIZER" header was drawing
+directly under the iPhone status bar/clock, overlapping and unreadable.
+`index.html`'s viewport meta already sets `viewport-fit=cover` (needed
+for a proper full-screen PWA — without it the app would show white bars
+around the notch/status bar instead of extending behind it), but nothing
+in the app actually padded for that safe area. This is the exact "Notch &
+Keyboard Occlusion" item from this project's original hardening
+checklist — specified as a requirement from the very first version, never
+actually implemented until this screenshot surfaced it visibly.
+
+Fixed: the header now gets
+`pt-[calc(1rem+env(safe-area-inset-top))]` instead of plain `p-4`, and
+the same class of fix was applied proactively (not yet screenshotted, but
+structurally identical risk) to all four bottom-sheet modals
+(`BlockPayPrompt`, `DeadlinePrompt`, `ApartmentIntelEditor`,
+`OfferComparator`) — each slides up flush against the literal bottom edge
+of the viewport on mobile, which on an iPhone sits under the home
+indicator / gesture bar. Verified the compiled CSS actually contains both
+`env(safe-area-inset-top)` and `env(safe-area-inset-bottom)` rules after
+building, not just that the source edit looked right.
+
+## Camera-only bug fixed, Home screen added
+
+**Real regression, my mistake.** `capture="environment"` (added earlier
+based on the original brief's camera-access language) was forcing the
+file input straight to the camera app with no path to the photo library
+on iOS — but a Flex itinerary is a screenshot already sitting in Photos
+from the Flex app, never something to photograph live. Removed the
+attribute entirely; `ItineraryUpload` now opens the standard picker
+(library, camera, files), which is what the app's actual use case always
+needed.
+
+**`HomeScreen.jsx`** — the idle screen was previously just a bare upload
+card, which read more like a debug screen than an app. Now the entry
+point is proper branding plus two clear primary actions (Upload
+Itinerary, Compare Offers) as equally-weighted cards, a personalized
+greeting when signed in, and a light touch of the driver's saved
+preferred stations. Upload now lives behind its own sub-screen (reachable
+from Home, with a "← Home" back button) rather than being the only thing
+on screen. Verified via rendered output: the personalized greeting when
+an email is present, the fallback tagline when not, both action cards,
+and the station chips all render correctly.
+
+## Full line-by-line audit
+
+A rigorous pass through all 32 source files plus schema.sql (not a
+skim — every file read in full, cross-referenced against how it's
+actually called elsewhere in the app) found 8 real bugs, all fixed and
+verified:
+
+1. **Auto-learning trigger double-counted deliveries.** The trigger only
+   checked `NEW.status = 'completed'`, never comparing against
+   `OLD.status` — so any repeat update to an already-completed
+   `route_stops` row (a double-tap, or the offline queue replaying a
+   write that had actually already succeeded) would fire again and
+   silently double-count that delivery into the location's learned
+   average. Fixed with `OLD.status IS DISTINCT FROM 'completed'`.
+2. **No double-tap lock on DELIVERED/SKIP** — the bug that fed #1 in
+   practice. `setCurrentIndex(prev => prev + 1)` isn't idempotent, so two
+   fires before re-render genuinely advance the index by 2, silently
+   skipping a stop the driver never saw. This was a named requirement in
+   the original project brief, never implemented. Fixed with a
+   synchronous ref-based lock (a `useState` alone isn't fast enough to
+   catch two events in the same tick) plus a visual disabled/"Saving…"
+   state. Verified directly: two rapid calls produce exactly one
+   execution; resetting and tapping again correctly produces a second.
+3. **Offline route restore silently dropped pay/deadline tracking** — the
+   IndexedDB cache never stored `blockPayCents`/`deadlineTime`, so
+   resuming an interrupted route (the exact scenario the cache exists
+   for) lost both silently. Fixed and verified round-trip through real
+   IndexedDB (via `fake-indexeddb`, finally closing a testing gap that
+   had been flagged but not resolved across several earlier rounds).
+4. **Stale closure in the reoptimize cache write** — read the
+   closed-over `stops` variable instead of fresh state, which could
+   silently drop a concurrent vehicle-zone tag from the cache if it
+   landed while a reoptimize network call was in flight. Fixed by
+   removing the redundant/buggy explicit call and relying on the
+   existing auto-sync effect, which always reads fresh state.
+5. **Apple Maps fired a spurious second navigation** — the fallback link
+   fired unconditionally 500ms later even when the `maps://` scheme
+   succeeded, so a driver genuinely on iOS got an unwanted redirect when
+   switching back to the browser. Fixed with a `visibilitychange` check.
+   Verified both branches directly: app-switch-succeeds (no fallback
+   fires) and app-switch-fails (fallback correctly still fires).
+6. **OCR text parser could misattribute data between duplicate-address
+   stops** — `lines.indexOf(line)` found only the first match of a given
+   line's text, so two stops with identical address text (plausible for
+   duplicate deliveries to the same apartment complex) would have their
+   package count/delivery window extraction scrambled. Fixed by tracking
+   `{line, index}` pairs through the filter instead of re-deriving
+   positions afterward. Verified with the exact duplicate-address
+   scenario: each stop now correctly keeps its own data.
+7. Misplaced JSDoc comment in `routes.js` (described the wrong function).
+8. Index-based React `key` in `ManualStopReview.jsx` (cosmetic focus-jump
+   risk on row removal, not data corruption) — given a stable synthetic
+   key instead.
+
+Also fixed opportunistically while in these files: a misleading comment
+in `auth.js` claiming a database trigger creates the `drivers` row (no
+such trigger exists — the client-side upsert is the only mechanism, and
+there's no retry if it fails, which is a real if narrow gap worth
+knowing about), a dead no-op ternary in `optimize.js`, and a comment
+typo.
+

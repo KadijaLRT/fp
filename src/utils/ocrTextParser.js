@@ -37,25 +37,37 @@ export function parseRawOcrText(rawText) {
     .map((l) => l.trim())
     .filter(Boolean);
 
-  const candidateLines = lines.filter((line) => {
-    if (!ADDRESS_LINE_PATTERN.test(line)) return false;
+  // Bug fix: this used to filter `lines` into `candidateLines` (losing
+  // each line's original position), then re-find each one's index via
+  // `lines.indexOf(line)` — which returns the *first* match of that exact
+  // text. Two stops with identical address-line text (plausible for
+  // duplicate deliveries to the same apartment complex) would then both
+  // resolve to the same source position, and the second one's package
+  // count / delivery window would be silently pulled from the first
+  // stop's block of text instead of its own. Filtering {line, index}
+  // pairs up front keeps each candidate's real position, even when the
+  // text collides with another line elsewhere in the screenshot.
+  const candidateEntries = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line }) => {
+      if (!ADDRESS_LINE_PATTERN.test(line)) return false;
 
-    // Reject lines that are basically just "N packages" or "N item(s)" —
-    // these match the address pattern (a leading number) but aren't
-    // addresses. A real street address has more going on than two words.
-    const wordCount = line.split(/\s+/).filter(Boolean).length;
-    if (wordCount < 3) return false;
+      // Reject lines that are basically just "N packages" or "N item(s)" —
+      // these match the address pattern (a leading number) but aren't
+      // addresses. A real street address has more going on than two words.
+      const wordCount = line.split(/\s+/).filter(Boolean).length;
+      if (wordCount < 3) return false;
 
-    // Reject lines that are essentially just a time window with little
-    // else — stripping the matched time text should still leave a
-    // meaningful amount of content behind for this to be an address line.
-    const strippedOfTime = line.replace(TIME_WINDOW_PATTERN, '').trim();
-    if (strippedOfTime.length < 6) return false;
+      // Reject lines that are essentially just a time window with little
+      // else — stripping the matched time text should still leave a
+      // meaningful amount of content behind for this to be an address line.
+      const strippedOfTime = line.replace(TIME_WINDOW_PATTERN, '').trim();
+      if (strippedOfTime.length < 6) return false;
 
-    return true;
-  });
+      return true;
+    });
 
-  if (candidateLines.length === 0) {
+  if (candidateEntries.length === 0) {
     return [emptyStop(1)];
   }
 
@@ -63,11 +75,9 @@ export function parseRawOcrText(rawText) {
   // separate lines below the address, not inline — so search a small
   // window of following lines (up to the next address line) rather than
   // only the address line itself, which would miss them entirely.
-  const candidateIndices = candidateLines.map((line) => lines.indexOf(line));
-
-  return candidateLines.map((line, idx) => {
-    const startIdx = candidateIndices[idx];
-    const endIdx = idx + 1 < candidateIndices.length ? candidateIndices[idx + 1] : Math.min(lines.length, startIdx + 5);
+  return candidateEntries.map(({ line, index: startIdx }, idx) => {
+    const endIdx =
+      idx + 1 < candidateEntries.length ? candidateEntries[idx + 1].index : Math.min(lines.length, startIdx + 5);
     const blockLines = lines.slice(startIdx, endIdx);
     const blockText = blockLines.join(' ');
 

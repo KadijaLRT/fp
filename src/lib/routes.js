@@ -87,12 +87,6 @@ export async function createRouteStops(routeId, stops) {
 }
 
 /**
- * Marks a single route_stops row completed or skipped. A 'completed'
- * update with a total_stop_seconds value is what actually fires the
- * update_location_intelligence trigger — this is the one write in the
- * whole app that feeds the learning loop.
- */
-/**
  * Sets/updates which part of the vehicle a stop's package(s) were loaded
  * into. Manual-only (see schema.sql comment) — never inferred, since
  * nothing in the OCR/geocoding pipeline has a source for this data.
@@ -131,6 +125,12 @@ export async function updateBlockPay(routeId, blockPayCents) {
   }
 }
 
+/**
+ * Marks a single route_stops row completed or skipped. A 'completed'
+ * update with a total_stop_seconds value is what actually fires the
+ * update_location_intelligence trigger — this is the one write in the
+ * whole app that feeds the learning loop.
+ */
 export async function finalizeRouteStop(routeStopId, { status, totalStopSeconds }) {
   if (!supabase || !routeStopId) return false;
   if (!['completed', 'skipped', 'failed'].includes(status)) return false;

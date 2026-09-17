@@ -15,11 +15,26 @@ export function openExternalMap(lat, lng, label, appPreference = 'google') {
     if (appPreference === 'waze') {
       window.location.href = `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
     } else if (appPreference === 'apple') {
+      // Bug fix: this used to fire the universal-link fallback
+      // unconditionally 500ms later, even when the maps:// scheme
+      // actually succeeded — meaning a driver genuinely on iOS would get
+      // a second, unwanted navigation the moment they switched back to
+      // the browser tab. The fix: only fall back if the tab never
+      // actually lost visibility (backgrounded) in that window, which is
+      // what a successful app-switch looks like.
+      let appSwitchedAway = false;
+      const onVisibilityChange = () => {
+        if (document.hidden) appSwitchedAway = true;
+      };
+      document.addEventListener('visibilitychange', onVisibilityChange);
+
       window.location.href = `maps://maps.apple.com/?daddr=${lat},${lng}&q=${encodedLabel}`;
-      // Apple Maps custom scheme silently no-ops on non-Apple devices;
-      // fall back to the universal link after a beat.
+
       setTimeout(() => {
-        window.location.href = `https://maps.apple.com/?daddr=${lat},${lng}&q=${encodedLabel}`;
+        document.removeEventListener('visibilitychange', onVisibilityChange);
+        if (!appSwitchedAway) {
+          window.location.href = `https://maps.apple.com/?daddr=${lat},${lng}&q=${encodedLabel}`;
+        }
       }, 500);
     } else {
       window.location.href = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;

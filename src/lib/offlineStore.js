@@ -72,6 +72,8 @@ export async function cacheRouteOffline(routeId, stops, meta = {}) {
         currentIndex: meta.currentIndex ?? 0,
         routeStartedAtMs: meta.routeStartedAtMs ?? null,
         routeEstDurationSeconds: meta.routeEstDurationSeconds ?? null,
+        blockPayCents: meta.blockPayCents ?? null,
+        deadlineTime: meta.deadlineTime ?? null,
         cachedAt: Date.now()
       });
     });

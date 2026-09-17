@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ItineraryUpload from './components/ItineraryUpload';
+import HomeScreen from './components/HomeScreen';
 import ActiveStopCard from './components/ActiveStopCard';
 import AuthScreen from './components/AuthScreen';
 import ApartmentIntelEditor from './components/ApartmentIntelEditor';
@@ -52,6 +53,11 @@ export default function App() {
   const [blockPayCents, setBlockPayCents] = useState(null);
   const [showBlockPayPrompt, setShowBlockPayPrompt] = useState(false);
   const [showOfferComparator, setShowOfferComparator] = useState(false);
+  // Whether the driver has tapped into the upload flow from Home. Reset
+  // to false whenever they land back on the idle screen (new route
+  // started/completed/abandoned) so re-opening the app always starts at
+  // Home, not mid-flow.
+  const [showUploadScreen, setShowUploadScreen] = useState(false);
   // "Must finish by" deadline — see DeadlineBanner/DeadlinePrompt. Reset
   // per-route like blockPayCents, since a deadline from a previous block
   // shouldn't silently carry over to a new one.
@@ -88,9 +94,11 @@ export default function App() {
     cacheRouteOffline(currentRouteId, stops, {
       currentIndex,
       routeStartedAtMs,
-      routeEstDurationSeconds
+      routeEstDurationSeconds,
+      blockPayCents,
+      deadlineTime
     });
-  }, [stops, currentIndex, currentRouteId, routeStartedAtMs, routeEstDurationSeconds]);
+  }, [stops, currentIndex, currentRouteId, routeStartedAtMs, routeEstDurationSeconds, blockPayCents, deadlineTime]);
 
   // On mount, offer to restore a cached route if one exists — this is the
   // actual "seamless in a dead zone" scenario: the app got killed
@@ -132,6 +140,13 @@ export default function App() {
     setCurrentRouteId(restorableRoute.routeId || null);
     setRouteStartedAtMs(restorableRoute.routeStartedAtMs || null);
     setRouteEstDurationSeconds(restorableRoute.routeEstDurationSeconds || null);
+    // Bug fix: these were never restored, even though they were cached —
+    // a driver who'd entered a block's pay and a finish-by deadline before
+    // an interruption would resume the route correctly but silently lose
+    // both, right in the scenario (app killed in a dead zone) this whole
+    // cache exists for.
+    setBlockPayCents(typeof restorableRoute.blockPayCents === 'number' ? restorableRoute.blockPayCents : null);
+    setDeadlineTime(restorableRoute.deadlineTime || null);
     setRestorableRoute(null);
   };
 
@@ -528,8 +543,8 @@ export default function App() {
 
   // Wrapped persistence helpers: queue to IndexedDB instead of losing the
   // write entirely when offline (checked before attempting) or when a
-  // write fails outempted while nominally online (network flakiness isn't
-  // always reflected accurately in navigator.onLine). Queued entries get
+  // write fails while nominally online (network flakiness isn't always
+  // reflected accurately in navigator.onLine). Queued entries get
   // replayed by the reconnect effect above.
   const persistStopCompletion = useCallback(
     async (routeStopId, payload) => {
@@ -597,6 +612,7 @@ export default function App() {
         setRouteEstDurationSeconds(null);
         setBlockPayCents(null);
         setDeadlineTime(null);
+        setShowUploadScreen(false);
         clearCachedRoute();
         alert(completionMessage);
       }
@@ -712,12 +728,14 @@ export default function App() {
     const newOrder = reordered.map((s) => s.id);
     const orderChanged = originalOrder.some((id, i) => id !== newOrder[i]);
 
+    // Cache write intentionally omitted here — the auto-sync effect
+    // (keyed on `stops` changing) picks this up on the next render and
+    // always reads fresh state. An explicit call here used to read the
+    // stale closed-over `stops` variable instead of the functional
+    // updater's `prev`, which could silently write a cache entry missing
+    // any other stops-mutating change (e.g. a vehicle-zone tag) that
+    // happened to land while this reoptimize call was in flight.
     setStops((prev) => [...prev.slice(0, currentIndex), ...reordered, ...unresolvedRemaining]);
-    cacheRouteOffline(currentRouteId, [...stops.slice(0, currentIndex), ...reordered, ...unresolvedRemaining], {
-      currentIndex,
-      routeStartedAtMs,
-      routeEstDurationSeconds
-    });
 
     if (orderChanged && isOnline) {
       fetchRouteExplanation(originalOrder, newOrder);
@@ -750,6 +768,7 @@ export default function App() {
     setShowBlockPayPrompt(false);
     setDeadlineTime(null);
     setShowDeadlinePrompt(false);
+    setShowUploadScreen(false);
     clearCachedRoute();
   };
 
@@ -770,7 +789,9 @@ export default function App() {
 
   return (
     <div className={`min-h-screen ${batterySaverMode ? 'bg-black' : 'bg-slate-900'} text-slate-100 flex flex-col font-sans`}>
-      <header className={`p-4 ${batterySaverMode ? 'bg-black border-slate-800' : 'bg-slate-800 border-slate-700'} border-b flex justify-between items-center`}>
+      <header
+        className={`px-4 pb-4 pt-[calc(1rem+env(safe-area-inset-top))] ${batterySaverMode ? 'bg-black border-slate-800' : 'bg-slate-800 border-slate-700'} border-b flex justify-between items-center`}
+      >
         <h1 className="font-extrabold text-base tracking-tight text-amber-400">
           ⚡ FLEX ROUTE OPTIMIZER
         </h1>
@@ -843,25 +864,31 @@ export default function App() {
                 </div>
               </div>
             )}
-            {processingError && (
-              <p role="alert" className="text-center text-xs text-red-400 font-semibold mb-3 px-4">
-                {processingError}
-              </p>
-            )}
-            <ItineraryUpload onRouteImported={handleRouteImported} />
 
-            {/* Pre-accept decision tool — independent of any active route,
-                since this is for the moment BEFORE you accept a block, not
-                during one. Pure arithmetic on numbers Amazon's own Offers
-                screen already shows; no automation of anything. */}
-            <div className="max-w-md mx-auto px-4 mt-2 text-center">
-              <button
-                onClick={() => setShowOfferComparator(true)}
-                className="text-xs text-slate-400 underline py-2"
-              >
-                📊 Compare offer pay rates
-              </button>
-            </div>
+            {showUploadScreen ? (
+              <div>
+                <div className="max-w-md mx-auto px-4 pt-2">
+                  <button
+                    onClick={() => setShowUploadScreen(false)}
+                    className="text-sm text-slate-400 flex items-center gap-1 py-2"
+                  >
+                    ← Home
+                  </button>
+                </div>
+                {processingError && (
+                  <p role="alert" className="text-center text-xs text-red-400 font-semibold mb-3 px-4">
+                    {processingError}
+                  </p>
+                )}
+                <ItineraryUpload onRouteImported={handleRouteImported} />
+              </div>
+            ) : (
+              <HomeScreen
+                onUpload={() => setShowUploadScreen(true)}
+                onCompareOffers={() => setShowOfferComparator(true)}
+                driverEmail={session?.user?.email}
+              />
+            )}
           </div>
         ) : (
           <div>
