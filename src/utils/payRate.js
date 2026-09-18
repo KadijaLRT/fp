@@ -1,8 +1,7 @@
 /**
- * Shared between PayRateBanner (live pace during a route) and
- * OfferComparator (deciding between offers before accepting one) so both
- * agree on what counts as a "good" rate instead of two different magic
- * number sets drifting apart over time.
+ * Rate-formatting/color logic used by PayRateBanner's live $/hr pace
+ * display. Kept separate from that component so the "what counts as a
+ * good rate" thresholds live in one place rather than inline.
  */
 
 // Rough Flex pay benchmarks — not official Amazon figures, just a

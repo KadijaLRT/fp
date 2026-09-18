@@ -209,7 +209,17 @@ export default function ItineraryUpload({ onRouteImported }) {
       // Dynamically imported: Tesseract.js (and its wasm/worker assets) is
       // large, and most sessions never need it since the primary Groq OCR
       // path usually succeeds — no reason to pay that bundle cost upfront.
-      const Tesseract = await import('tesseract.js');
+      //
+      // Bug fix: `await import('tesseract.js')` returns the ES module
+      // namespace object, not the package's default export — Tesseract.js
+      // ships as CJS with `recognize`/`createWorker`/etc. attached to
+      // `module.exports`, which lands on `.default` here, not on the
+      // namespace object directly. The previous code called
+      // `Tesseract.recognize(...)` on the namespace object, which is
+      // `undefined` there — every text-scan attempt threw a TypeError
+      // immediately and was silently swallowed by the catch block below,
+      // always reporting "text scan also failed" regardless of the image.
+      const { default: Tesseract } = await import('tesseract.js');
       const { data } = await Tesseract.recognize(failedItem.file, 'eng');
       const parsedStops = parseRawOcrText(data?.text);
       setReviewStops(parsedStops);
@@ -321,38 +331,54 @@ export default function ItineraryUpload({ onRouteImported }) {
               </button>
             </div>
 
-            <div className="space-y-1.5 max-h-48 overflow-y-auto">
+            <div className="space-y-1.5 max-h-56 overflow-y-auto">
               {batch.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex justify-between items-center bg-white rounded-lg border border-gray-200 px-3 py-2 text-xs"
-                >
-                  <span className="truncate flex-1 text-gray-600">{item.file?.name || 'Manually entered'}</span>
-                  {item.status === 'success' && (
-                    <span className="text-emerald-600 font-semibold ml-2">✓ {item.stops.length} stops</span>
-                  )}
+                <div key={item.id} className="bg-white rounded-lg border border-gray-200 px-3 py-2 text-xs">
+                  <div className="flex justify-between items-center">
+                    <span className="truncate flex-1 text-gray-600">{item.file?.name || 'Manually entered'}</span>
+                    {item.status === 'success' && (
+                      <span className="text-emerald-600 font-semibold ml-2 whitespace-nowrap">
+                        ✓ {item.stops.length} stops
+                      </span>
+                    )}
+                    {item.status === 'error' && (
+                      <span className="text-red-500 font-semibold ml-2 whitespace-nowrap">✗ Failed</span>
+                    )}
+                    {(item.status === 'pending' || item.status === 'processing') && (
+                      <span className="text-slate-400 ml-2 whitespace-nowrap">
+                        ⏳ {item.status === 'processing' ? 'Scanning…' : 'Queued'}
+                      </span>
+                    )}
+                  </div>
+
                   {item.status === 'error' && (
-                    <div className="flex items-center gap-1.5 ml-2">
-                      <span className="text-red-500 font-semibold" title={item.error}>✗ Failed</span>
-                      <button
-                        onClick={() => handleTryTextScan(item)}
-                        className="text-slate-500 underline text-[11px]"
-                      >
-                        Text scan
-                      </button>
-                      <button
-                        onClick={() => handleManualEntry(item)}
-                        className="text-slate-500 underline text-[11px]"
-                      >
-                        Manual
-                      </button>
-                      <button onClick={() => handleRemoveItem(item.id)} className="text-slate-400 text-[11px]">
-                        Remove
-                      </button>
-                    </div>
-                  )}
-                  {(item.status === 'pending' || item.status === 'processing') && (
-                    <span className="text-slate-400 ml-2">⏳ {item.status === 'processing' ? 'Scanning…' : 'Queued'}</span>
+                    <>
+                      {/* Bug fix: this error text used to live only in a
+                          `title` attribute — a hover tooltip that does
+                          nothing on a touchscreen, the one device type
+                          this app actually runs on. A driver had no way
+                          to see *why* a screenshot failed. */}
+                      {item.error && (
+                        <p role="alert" className="text-red-400 mt-1 mb-1.5">{item.error}</p>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => handleTryTextScan(item)}
+                          className="text-slate-500 underline text-[11px]"
+                        >
+                          Text scan
+                        </button>
+                        <button
+                          onClick={() => handleManualEntry(item)}
+                          className="text-slate-500 underline text-[11px]"
+                        >
+                          Manual
+                        </button>
+                        <button onClick={() => handleRemoveItem(item.id)} className="text-slate-400 text-[11px]">
+                          Remove
+                        </button>
+                      </div>
+                    </>
                   )}
                 </div>
               ))}

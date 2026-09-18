@@ -2,9 +2,9 @@
  * A driver's standing "need to be done by" time — e.g. always before a
  * school-morning routine. Distinct from the per-route deadlineTime in
  * App.jsx (which is reset every route): this is the *default* that gets
- * pre-filled into DeadlinePrompt and OfferComparator so a recurring daily
- * constraint doesn't have to be retyped every single block. Device-local
- * like preferredStations/batterySaverMode, not account data.
+ * pre-filled into DeadlinePrompt so a recurring daily constraint doesn't
+ * have to be retyped every single block. Device-local like
+ * batterySaverMode, not account data.
  */
 
 const STORAGE_KEY = 'flexStandingDeadline';

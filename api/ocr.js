@@ -4,11 +4,17 @@ import { checkRateLimit, sendRateLimitResponse } from './_rateLimit.js';
 const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
 
 // Groq deprecates preview models frequently (llama-3.2-11b-vision-preview was
-// decommissioned in April 2025). Model ID is env-configurable so a future
-// deprecation is a config change, not a code change. As of Sept 2026, Groq's
-// recommended vision-capable model is qwen/qwen3.6-27b. Verify current
-// availability at https://console.groq.com/docs/models before deploying.
-const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.6-27b';
+// decommissioned in April 2025, and qwen/qwen3.6-27b — this file's previous
+// default — was subsequently withdrawn too, returning HTTP 404 despite still
+// being listed in Groq's docs at the time; it's a preview model, "intended
+// for evaluation, not production" per Groq's own vision docs, which is
+// exactly the kind of model that gets pulled with little notice). Model ID
+// is env-configurable so a future deprecation is a config change, not a
+// code change. As of Sept 2026, Groq's current documented vision-capable
+// models are qwen/qwen3.6-27b and qwen/qwen3.8-27b — using the newer one by
+// default since the older one has already been pulled once. Verify current
+// availability at https://console.groq.com/docs/vision before deploying.
+const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b';
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB — generous for a phone screenshot
 const REQUEST_TIMEOUT_MS = 25000;
@@ -154,6 +160,22 @@ export default async function handler(req, res) {
       }
       if (err.message === 'Groq request timed out') {
         return res.status(504).json({ error: 'OCR request timed out. Check your connection and try again.' });
+      }
+      // A 404 here almost always means the configured vision model has been
+      // withdrawn or renamed by Groq — this has already happened once (see
+      // the comment on VISION_MODEL above). Surfacing this distinctly
+      // instead of the generic fallback below matters: without it, a model
+      // misconfiguration looks identical to a network problem, and every
+      // screenshot fails with no clue why — which is exactly what happened
+      // here before this branch existed.
+      if (status === 404) {
+        console.error(
+          `Groq returned 404 for vision model "${VISION_MODEL}" — it may have been withdrawn or renamed. ` +
+            `Check https://console.groq.com/docs/vision and update GROQ_VISION_MODEL.`
+        );
+        return res.status(502).json({
+          error: 'The OCR model is temporarily unavailable (configuration issue on our end, not your screenshot). Try again shortly, or use text scan / manual entry for now.'
+        });
       }
       return res.status(502).json({ error: 'Failed to reach the OCR service.' });
     }

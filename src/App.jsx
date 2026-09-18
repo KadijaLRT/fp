@@ -6,7 +6,6 @@ import AuthScreen from './components/AuthScreen';
 import ApartmentIntelEditor from './components/ApartmentIntelEditor';
 import BlockPayPrompt from './components/BlockPayPrompt';
 import PayRateBanner from './components/PayRateBanner';
-import OfferComparator from './components/OfferComparator';
 import DeadlinePrompt from './components/DeadlinePrompt';
 import DeadlineBanner from './components/DeadlineBanner';
 import { geocodeAddressBatch } from './utils/geocoder';
@@ -52,7 +51,6 @@ export default function App() {
   // same screen as the itinerary this app OCRs.
   const [blockPayCents, setBlockPayCents] = useState(null);
   const [showBlockPayPrompt, setShowBlockPayPrompt] = useState(false);
-  const [showOfferComparator, setShowOfferComparator] = useState(false);
   // Whether the driver has tapped into the upload flow from Home. Reset
   // to false whenever they land back on the idle screen (new route
   // started/completed/abandoned) so re-opening the app always starts at
@@ -403,51 +401,71 @@ export default function App() {
       // server-side, but filtering here avoids a wasted round trip.
       const routableStops = geocodedStops.filter((s) => s.lat !== null && s.lng !== null);
 
-      if (routableStops.length < 2) {
-        setStops(geocodedStops);
-        setCurrentIndex(0);
+      // Bug fix: this used to require 2+ routable stops just to proceed at
+      // all, conflating two very different situations. A single valid
+      // stop is a completely legitimate, workable route (nothing to
+      // optimize between one point, but nothing wrong with it either) —
+      // the old code would either silently strand it (geocoding
+      // succeeded, no error shown, but the route clock never started and
+      // nothing persisted) or, if that one address failed to geocode,
+      // dump the driver into a broken "active route" view for an
+      // unnavigable stop with a message telling them to "add at least 2
+      // valid addresses" — actively misleading, since the real problem is
+      // that the one address they entered didn't resolve, not that they
+      // need more of them. Only a *complete* geocoding failure (zero
+      // routable stops) should actually block progress and keep the
+      // driver on the import screen to fix the address.
+      if (routableStops.length === 0) {
         setProcessingError(
-          unresolvedCount > 0
-            ? `${unresolvedCount} address(es) couldn't be located. Add at least 2 valid addresses to optimize a route.`
-            : null
+          unresolvedCount === 1
+            ? "That address couldn't be located. Check the spelling or add more detail and try again."
+            : `None of the ${unresolvedCount} address(es) could be located. Check them and try again.`
         );
-        return;
+        return; // stay on the import screen — stops is untouched
       }
 
       const originalOrder = routableStops.map((s) => s.id);
 
       let finalRoute = geocodedStops;
       let estimatedDrivingSeconds = null;
-      try {
-        const response = await withTimeout(
-          fetch('/api/optimize', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ stops: routableStops, mapboxToken })
-          }),
-          OPTIMIZE_TIMEOUT_MS
-        );
-        const result = await response.json();
 
-        if (response.ok && result.success) {
-          const unresolvedStops = geocodedStops.filter((s) => s.lat === null || s.lng === null);
-          finalRoute = [...result.optimizedStops, ...unresolvedStops];
-          estimatedDrivingSeconds = typeof result.estimatedDrivingSeconds === 'number' ? result.estimatedDrivingSeconds : null;
+      if (routableStops.length === 1) {
+        // Nothing to optimize between a single point — skip the network
+        // round trip entirely rather than forcing it through (or worse,
+        // blocking on) a solver built for ordering multiple stops.
+        estimatedDrivingSeconds = 0;
+      } else {
+        try {
+          const response = await withTimeout(
+            fetch('/api/optimize', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ stops: routableStops, mapboxToken })
+            }),
+            OPTIMIZE_TIMEOUT_MS
+          );
+          const result = await response.json();
 
-          const newOrder = result.optimizedStops.map((s) => s.id);
-          const orderChanged = originalOrder.some((id, i) => id !== newOrder[i]);
-          if (orderChanged) {
-            fetchRouteExplanation(originalOrder, newOrder);
+          if (response.ok && result.success) {
+            const unresolvedStops = geocodedStops.filter((s) => s.lat === null || s.lng === null);
+            finalRoute = [...result.optimizedStops, ...unresolvedStops];
+            estimatedDrivingSeconds = typeof result.estimatedDrivingSeconds === 'number' ? result.estimatedDrivingSeconds : null;
+
+            const newOrder = result.optimizedStops.map((s) => s.id);
+            const orderChanged = originalOrder.some((id, i) => id !== newOrder[i]);
+            if (orderChanged) {
+              fetchRouteExplanation(originalOrder, newOrder);
+            }
+          } else {
+            console.error('Optimization failed, falling back to offline solver:', result.error);
+            finalRoute = [...solveRouteOffline(routableStops), ...geocodedStops.filter((s) => s.lat === null || s.lng === null)];
+            setProcessingError(`Route optimization failed (${result.error || 'unknown error'}). Used an approximate offline route instead — reconnect and reoptimize when possible.`);
           }
-        } else {
-          console.error('Optimization failed, falling back to offline solver:', result.error);
+        } catch (optErr) {
+          console.error('Optimize request failed, falling back to offline solver:', optErr);
           finalRoute = [...solveRouteOffline(routableStops), ...geocodedStops.filter((s) => s.lat === null || s.lng === null)];
-          setProcessingError(`Route optimization failed (${result.error || 'unknown error'}). Used an approximate offline route instead — reconnect and reoptimize when possible.`);
+          setProcessingError('Could not reach the route optimizer. Used an approximate offline route (straight-line distance, not real driving times) instead.');
         }
-      } catch (optErr) {
-        console.error('Optimize request failed, falling back to offline solver:', optErr);
-        finalRoute = [...solveRouteOffline(routableStops), ...geocodedStops.filter((s) => s.lat === null || s.lng === null)];
-        setProcessingError('Could not reach the route optimizer. Used an approximate offline route (straight-line distance, not real driving times) instead.');
       }
 
       if (unresolvedCount > 0) {
@@ -885,7 +903,6 @@ export default function App() {
             ) : (
               <HomeScreen
                 onUpload={() => setShowUploadScreen(true)}
-                onCompareOffers={() => setShowOfferComparator(true)}
                 driverEmail={session?.user?.email}
               />
             )}
@@ -957,8 +974,6 @@ export default function App() {
           onSkip={handleSkipBlockPay}
         />
       )}
-
-      {showOfferComparator && <OfferComparator onClose={() => setShowOfferComparator(false)} />}
 
       {showDeadlinePrompt && (
         <DeadlinePrompt initialTime={deadlineTime} onSave={handleSaveDeadline} onSkip={handleSkipDeadline} />

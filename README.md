@@ -305,43 +305,22 @@ persistence a separate, independent concern.
 logic so `PayRateBanner` and `OfferComparator` (below) can't quietly drift
 into disagreeing about what counts as a "good" rate.
 
-## Offer Comparator — pre-accept decision helper
+## Compare Offers — removed
 
-Added after a screenshot of an actual Flex Offers screen showing two
-available blocks ($57.50 / 2.5hr and $121 / 3.5hr) prompted the
-observation that Amazon's own app already displays pay and duration for
-every offer — it just doesn't do the $/hr arithmetic for you in the few
-seconds you have to decide. `OfferComparator.jsx` is a small modal
-(reachable from the idle/upload screen, independent of any active route)
-where you enter pay + duration for each offer you're considering and it
-instantly ranks them by $/hr, highlighting the best one.
+The pre-accept $/hr comparator (`OfferComparator.jsx`) was removed:
+filling out pay/duration/start-time fields for each offer isn't something
+you can realistically do in the few seconds an offer actually sits on
+screen before it's gone, so the feature had no real-world usable moment
+despite being technically correct. Removed along with its
+offer-comparator-only dependents: `src/lib/preferredStations.js` (the
+station quick-select chips existed purely to speed up data entry into the
+now-removed comparator) and the "Your stations" display on the Home
+screen, which had no other purpose once nothing consumed it.
+`PayRateBanner` (live pace *during* a route) and the deadline-tracking
+system (`DeadlineBanner`/`DeadlinePrompt`/`driverDeadline.js`) are
+unaffected — both are genuinely usable in real time while driving, unlike
+a pre-accept form.
 
-**This is pure arithmetic on numbers Amazon's own UI already shows you —
-it does not read from, poll, or interact with Amazon's systems in any
-way.** That distinction matters: automating the *catching* of blocks
-(polling faster than a human, auto-accepting) is a ToS violation and
-something this project has explicitly declined to build; helping a human
-do arithmetic on what they can already see with their own eyes is a
-different thing entirely.
-
-Verified against the exact figures from the screenshot that prompted this
-(Windsor CT $57.50/2.5hr → $23.00/hr amber; Glastonbury $121/3.5hr →
-$34.57/hr green — confirming the less-obvious "bigger dollar number"
-offer is actually the better one), plus edge cases (zero duration, missing
-pay) degrading to `null`/`--` rather than crashing on `NaN`/`Infinity`.
-
-### Preferred stations
-
-`src/lib/preferredStations.js` (localStorage-backed, device-local like
-`batterySaverMode`) powers quick-select chips in the Offer Comparator so a
-driver who only ever works a handful of stations doesn't retype them
-every time. Seeded once, on first use, with whatever stations the driver
-has told the app about — never overwrites a list the driver has already
-customized via the Edit toggle. Verified directly with a localStorage
-shim: seeding, deduplication (adding the same station twice doesn't
-double up), removal, and input sanitization (trims whitespace, drops
-empty entries) all behave correctly, plus confirmed via rendered output
-that the chips actually appear on first use.
 
 
 
@@ -379,32 +358,16 @@ Reset alongside `blockPayCents` at the same three points (new route
 imported, route completed, route abandoned) so a deadline from a previous
 block never silently carries over to a new one.
 
-### Deadline checking added to the Offer Comparator too
+### Deadline checking
 
-Extended so the same "would this get me done in time" check works
-*before* accepting a block, not just during one — the Offers screen shows
-each offer's start time and duration, so finish time is computable from
-information already on screen, same as the $/hr math.
+`src/lib/driverDeadline.js` stores the deadline as a saved *standing*
+preference ("need to be done by 8:30") rather than something re-entered
+per block, since for a driver with a fixed daily constraint that's the
+more honest model — `DeadlinePrompt` pre-fills from it and saves back to
+it. (This originally also fed a pre-accept version of the check in the
+now-removed Compare Offers feature; that part went with it, but the
+in-route `DeadlineBanner` check is unaffected.)
 
-- **`src/lib/driverDeadline.js`** — the deadline is now a saved *standing*
-  preference ("need to be done by 8:30") rather than something re-entered
-  per block, since for a driver with a fixed daily constraint that's the
-  more honest model. `DeadlinePrompt` now pre-fills from it and saves back
-  to it; `OfferComparator` pre-fills its own deadline field from the same
-  source.
-- Each offer row in `OfferComparator` now has a **Starts** time field;
-  once both a deadline and a start time are entered, a status pill appears
-  per offer — ✅ comfortable, ⚠️ tight, ❌ finishes after your deadline —
-  reusing the same verified `assessDeadlineStatus`/`parseDeadlineToday`
-  logic as the in-route banner, so the two features can't disagree about
-  what "tight" means.
-
-Verified directly against the actual offers from the screenshot that
-prompted the $/hr feature: with an 8:30am deadline, both the Windsor
-(3:45-6:15) and Glastonbury (3:15-6:45) blocks correctly show
-"comfortable" (hours of buffer), and a hypothetical later block
-(6:00-9:30) correctly flags as "late" against the same deadline —
-confirming the boundary actually triggers, not just the easy case.
 
 ## Schema fix: re-running `schema.sql` no longer errors
 
@@ -600,4 +563,115 @@ through `api/optimize.js`'s chunked-matrix path end-to-end (55 > 25,
 so this exercises the tiling logic, not the single-request fast path) —
 55 stops back, no duplicates or missing entries, in under 30ms against a
 mocked Mapbox response.
+
+## Real production incident: OCR failing on every screenshot
+
+A screenshot showed two uploaded screenshots both failing with a bare
+"✗ Failed" and no other information. Two real problems, chased down and
+fixed, not just patched over:
+
+1. **The error message was invisible on the device that matters.** It
+   only lived in an HTML `title` attribute — a hover tooltip, which does
+   nothing on a touchscreen. A driver had no way to ever see *why*
+   something failed, on the one device type this app actually runs on.
+   Fixed: the message now renders as visible text under the failed item.
+2. **The root cause, once visible, would have been a model 404.**
+   `qwen/qwen3.6-27b` (this file's vision-model default) has been
+   withdrawn by Groq — confirmed via a corroborated real-world bug report
+   in another project hitting the identical symptom, even though Groq's
+   own docs page still listed it as current at the time. It's a preview
+   model, which Groq's own vision docs note explicitly is "intended for
+   evaluation, not production" — exactly the kind of model that gets
+   pulled with little notice regardless of what the docs say. Switched
+   the default to `qwen/qwen3.8-27b`, the newer model in the same family,
+   also confirmed as a currently-documented vision model (not a blind
+   guess — `openai/gpt-oss-120b`, tempting as a swap since it's used
+   elsewhere in this app, is text-only and would have silently broken
+   OCR entirely rather than fixing it).
+3. **Added specific 404 handling** in `api/ocr.js` — previously a
+   withdrawn-model error fell through to a generic "Failed to reach the
+   OCR service" message, indistinguishable from an actual network
+   problem. Now surfaces a specific, correctly-scoped message ("OCR model
+   temporarily unavailable, not your screenshot's fault") and logs the
+   exact model name for whoever's maintaining the deploy to act on.
+
+**The uncomfortable part worth being honest about:** this exact failure
+mode (a Groq preview vision model getting silently withdrawn) already
+happened once before in this project (`llama-3.2-11b-vision-preview`,
+back at the very start) and is *why* the model was made env-configurable
+in the first place — and it still happened again, because "configurable"
+only helps once someone notices and changes it. If OCR ever silently
+stops working again, check `console.groq.com/docs/vision` for the
+current model list before assuming the code itself is broken.
+
+## Text scan fallback was completely broken — real fix, not a guess
+
+Checked directly rather than assumed: `await import('tesseract.js')`
+returns the ES module **namespace object**, not the package's actual
+API surface. Tesseract.js ships as CJS with `recognize`/`createWorker`/
+etc. attached to `module.exports`, which lands on that namespace
+object's `.default` property, not on the object itself. The previous
+code called `Tesseract.recognize(...)` directly on the namespace object
+— which is `undefined` there — so every single text-scan attempt threw
+a `TypeError` immediately, silently caught by the surrounding try/catch,
+and always reported "text scan also failed" regardless of image quality.
+Confirmed both the bug and the fix directly against the real installed
+package (not assumed from documentation): `Tesseract.recognize` is
+`undefined` on the raw import, `Tesseract.default.recognize` is a real
+function. Fixed by destructuring `{ default: Tesseract }` at the import
+site. Code-splitting confirmed unaffected — same 16KB separate chunk as
+before, so Tesseract still isn't bundled into the main app for sessions
+that never need it.
+
+**Manual entry — structurally correct, but likely hitting a separate,
+non-code issue.** `ManualStopReview.jsx` and the batch-merge logic in
+`ItineraryUpload.jsx` were reviewed line by line and are sound — no bug
+found there. But every path (OCR success, text-scan recovery, and manual
+entry) all funnel into the same `handleRouteImported` in `App.jsx`, whose
+very first action is checking `VITE_MAPBOX_TOKEN`. If that's still unset
+on the live deployment (the exact error shown in this project's very
+first screenshot), *every* import method would fail identically the
+moment "Continue" is pressed — which would look like "nothing works"
+even though only the text-scan path had an actual code bug. Worth
+confirming directly: does manually entering a stop and hitting Continue
+show "Mapbox is not configured (VITE_MAPBOX_TOKEN missing)" in red text?
+If so, that's a Vercel environment-variable configuration issue, not
+something a code fix can address — see the "how do I add API key"
+section of this README's history for the exact steps (Vercel dashboard →
+Environment Variables → add `VITE_MAPBOX_TOKEN` → **redeploy**, since
+Vite bakes env vars in at build time and a restart alone won't pick up a
+newly-added one).
+
+## The real manual-entry bug (once Mapbox/Groq were confirmed set)
+
+With both API keys confirmed configured, the actual bug was structural,
+not configuration: `handleRouteImported` required **2 or more** routable
+stops just to proceed at all — a threshold that makes sense for the
+*optimizer* (nothing to route between one point) but was wrongly gating
+whether the app could use a single stop at all. Traced precisely:
+
+- **One address, geocoded successfully:** no error shown, but the route
+  never actually started — `routeStartedAtMs` stayed null, nothing
+  persisted, no pay/deadline banners — a silently stranded half-state.
+- **One address, geocoding failed:** dumped into a broken "active route"
+  view for an unnavigable stop, with a message reading *"add at least 2
+  valid addresses"* — actively misleading, since the real problem was
+  that the one address entered didn't resolve, not that more were needed.
+
+Fixed by splitting what used to be one combined check into what it
+actually is: **zero** routable stops is the only real failure (stay on
+the import screen, show an accurate message about the address itself,
+never touch `stops` state); **one** routable stop is a completely
+legitimate route (skip the network round trip to `/api/optimize` — there's
+nothing to order between a single point — and run it through the exact
+same persistence/caching/clock-start pipeline multi-stop routes get);
+**two or more** is the original optimize path, unchanged. Verified by
+tracing the downstream consequences directly: `handleCompleteStop`'s
+existing branch logic (`currentIndex < stops.length - 1`) correctly
+completes a route when `stops.length === 1` without any special-casing
+needed there, and `ActiveStopCard` renders "Stop 1 of 1" cleanly. This
+one wasn't verified with an executable test the way the pure-logic files
+were — it's threaded through live geocoding/session/Supabase state that
+isn't practical to mock outside a real browser — so it's worth an actual
+click-through on a real device before fully trusting it.
 
