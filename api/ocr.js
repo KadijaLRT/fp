@@ -17,7 +17,18 @@ const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_
 const VISION_MODEL = process.env.GROQ_VISION_MODEL || 'qwen/qwen3.8-27b';
 
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB — generous for a phone screenshot
-const REQUEST_TIMEOUT_MS = 25000;
+// Bug fix, found from a real "check connection" failure report that grew
+// worse with batch size: the server's own worst-case retry time (3
+// attempts × REQUEST_TIMEOUT_MS + backoff) could reach ~76.5s at the
+// previous 25000ms setting, while the client gave up after 30s — meaning
+// a single retry (25s) plus its 500ms backoff already exceeded the
+// client's entire budget before the server's second attempt even
+// started. Every image that needed even one retry looked like a
+// connection failure to the client while the server was still correctly
+// working. Reduced here so the full worst case comfortably fits under
+// the client's timeout (see UPLOAD_TIMEOUT_MS in ItineraryUpload.jsx),
+// instead of the two budgets working against each other.
+const REQUEST_TIMEOUT_MS = 12000;
 const MAX_RETRIES = 2;
 
 function withTimeout(promise, ms) {

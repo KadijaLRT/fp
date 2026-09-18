@@ -19,7 +19,31 @@ import { applySuggestedZones } from './utils/vehicleZoneSuggester';
 import { supabase } from './lib/supabaseClient';
 import { getCurrentSession, onAuthStateChange, signOut } from './lib/auth';
 
-const OPTIMIZE_TIMEOUT_MS = 20000;
+// Bug fix: this used to be a flat 20000ms regardless of route size, but
+// /api/optimize's actual work scales with stop count — routes over 25
+// stops need multiple chunked Mapbox Matrix requests (see
+// buildFullDurationMatrix in api/optimize.js), and each worker in that
+// pool processes several chunks *sequentially*. A single fixed timeout
+// can't be right for both a 5-stop route (fast path, one request) and a
+// 55+ stop route (many sequential chunk fetches per worker) — it was
+// either too short for large routes (exactly what caused a real "check
+// connection" failure report that got worse with batch/route size) or
+// would have to be uselessly long for small ones. Scales with the same
+// O(chunks²/concurrency) shape the server actually uses, so the timeout
+// tracks the real amount of work being requested instead of guessing.
+function computeOptimizeTimeoutMs(stopCount) {
+  const CHUNK_SIZE = 12;
+  const CONCURRENCY = 4;
+  const MAPBOX_MAX_COORDS_PER_REQUEST = 25;
+  const blockPairs =
+    stopCount <= MAPBOX_MAX_COORDS_PER_REQUEST ? 1 : Math.ceil(stopCount / CHUNK_SIZE) ** 2;
+  const roundsPerWorker = Math.ceil(blockPairs / CONCURRENCY);
+  // 20s floor (covers the fast path plus a chunk or two needing an actual
+  // retry) + 2s per additional round, comfortably above typical Mapbox
+  // Matrix latency (well under a second per request in practice) with
+  // real margin for the occasional slow/retried one.
+  return 20000 + roundsPerWorker * 2000;
+}
 
 function withTimeout(promise, ms) {
   let timeoutId;
@@ -442,7 +466,7 @@ export default function App() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ stops: routableStops, mapboxToken })
             }),
-            OPTIMIZE_TIMEOUT_MS
+            computeOptimizeTimeoutMs(routableStops.length)
           );
           const result = await response.json();
 
@@ -721,7 +745,7 @@ export default function App() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ stops: routableRemaining, mapboxToken })
           }),
-          OPTIMIZE_TIMEOUT_MS
+          computeOptimizeTimeoutMs(routableRemaining.length)
         );
         const result = await response.json();
         if (response.ok && result.success) {
@@ -793,7 +817,7 @@ export default function App() {
   // --- Render -------------------------------------------------------------
   if (session === undefined) {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
+      <div className="min-h-screen bg-neutral-950 flex items-center justify-center">
         <div className="animate-spin text-4xl">⚙️</div>
       </div>
     );
@@ -806,51 +830,61 @@ export default function App() {
   const currentStop = stops[currentIndex];
 
   return (
-    <div className={`min-h-screen ${batterySaverMode ? 'bg-black' : 'bg-slate-900'} text-slate-100 flex flex-col font-sans`}>
+    <div className={`min-h-screen ${batterySaverMode ? 'bg-black' : 'bg-neutral-950'} text-neutral-100 flex flex-col font-sans`}>
       <header
-        className={`px-4 pb-4 pt-[calc(1rem+env(safe-area-inset-top))] ${batterySaverMode ? 'bg-black border-slate-800' : 'bg-slate-800 border-slate-700'} border-b flex justify-between items-center`}
+        className={`px-4 pb-4 pt-[calc(1rem+env(safe-area-inset-top))] ${batterySaverMode ? 'bg-black border-neutral-900' : 'bg-neutral-900 border-neutral-800'} border-b flex justify-between items-center`}
       >
-        <h1 className="font-extrabold text-base tracking-tight text-amber-400">
-          ⚡ FLEX ROUTE OPTIMIZER
-        </h1>
         <div className="flex items-center gap-2">
+          <div className="w-7 h-7 bg-amber-500 rounded-md flex items-center justify-center text-sm">⚡</div>
+          <span className="font-extrabold text-sm tracking-[0.1em] text-amber-500">DISPATCH</span>
+        </div>
+        <div className="flex items-center gap-1.5">
           {!isOnline && (
-            <span className="text-xs bg-amber-900 text-amber-200 px-2.5 py-1.5 rounded-lg font-semibold">
+            <span className="text-xs bg-amber-950 text-amber-400 px-2 py-1.5 rounded-lg font-semibold">
               📡 Offline
             </span>
           )}
           <button
             onClick={() => setBatterySaverMode((prev) => !prev)}
-            className="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-slate-300 transition-all min-h-[36px]"
+            className={`text-xs px-2.5 py-1.5 rounded-lg transition-all min-h-[36px] ${
+              batterySaverMode ? 'bg-amber-500 text-neutral-950 font-semibold' : 'bg-neutral-800 hover:bg-neutral-700 text-neutral-400'
+            }`}
             aria-pressed={batterySaverMode}
             title="OLED true-black mode — reduces screen power draw on OLED displays"
           >
-            {batterySaverMode ? '🔋 OLED On' : '🔋 OLED Off'}
+            🔋
           </button>
           {stops.length > 0 && (
             <button
               onClick={handleNewRoute}
-              className="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-slate-300 transition-all min-h-[36px]"
+              className="text-xs bg-neutral-800 hover:bg-neutral-700 px-2.5 py-1.5 rounded-lg text-neutral-400 transition-all min-h-[36px]"
             >
-              New Route
+              New
             </button>
           )}
           {supabase && session && (
             <button
               onClick={() => signOut()}
-              className="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-slate-300 transition-all min-h-[36px]"
+              className="text-xs bg-neutral-800 hover:bg-neutral-700 px-2.5 py-1.5 rounded-lg text-neutral-400 transition-all min-h-[36px]"
             >
-              Sign Out
+              Sign out
             </button>
           )}
         </div>
       </header>
 
-      <main className="flex-1 flex flex-col justify-center">
+      {/* justify-center suits the idle/Home screen (a centered card in
+          otherwise-empty space reads fine there) but was being applied
+          uniformly to the active-route dashboard too — pushing everything
+          down into a large dead gap at the top, the main contributor to
+          the "stuck, nowhere to go" feeling the layout gave. A dense
+          working screen should anchor to the top like any other
+          dashboard, not float centered like a splash screen. */}
+      <main className={`flex-1 flex flex-col ${stops.length > 0 ? 'justify-start pt-2' : 'justify-center'}`}>
         {isProcessingRoute ? (
           <div className="text-center p-6">
             <div className="animate-spin text-4xl mb-3">⚙️</div>
-            <p className="font-semibold text-sm text-slate-300">
+            <p className="font-semibold text-sm text-neutral-300">
               Geocoding addresses &amp; calculating fastest route…
             </p>
           </div>
@@ -858,9 +892,9 @@ export default function App() {
           <div>
             {restorableRoute && (
               <div className="max-w-md mx-auto px-4 mb-4">
-                <div className="bg-amber-50 border border-amber-300 rounded-xl p-4 text-center">
-                  <p className="text-sm font-bold text-amber-900 mb-1">Resume interrupted route?</p>
-                  <p className="text-xs text-amber-700 mb-3">
+                <div className="bg-neutral-900 border border-amber-900 rounded-xl p-4 text-center">
+                  <p className="text-sm font-bold text-amber-400 mb-1">Resume interrupted route?</p>
+                  <p className="text-xs text-neutral-400 mb-3">
                     Found a saved route with {restorableRoute.stops.length} stops
                     ({restorableRoute.stops.length - (restorableRoute.currentIndex || 0)} remaining) —
                     looks like the app closed before you finished.
@@ -868,13 +902,13 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={handleDiscardRestorableRoute}
-                      className="py-2.5 rounded-lg bg-white border border-amber-300 text-amber-700 text-sm font-semibold min-h-[44px]"
+                      className="py-2.5 rounded-lg bg-neutral-800 border border-neutral-700 text-neutral-300 text-sm font-semibold min-h-[44px]"
                     >
                       Discard
                     </button>
                     <button
                       onClick={handleRestoreRoute}
-                      className="py-2.5 rounded-lg bg-amber-500 text-white text-sm font-bold min-h-[44px]"
+                      className="py-2.5 rounded-lg bg-amber-500 text-neutral-950 text-sm font-bold min-h-[44px]"
                     >
                       Resume
                     </button>
@@ -888,7 +922,7 @@ export default function App() {
                 <div className="max-w-md mx-auto px-4 pt-2">
                   <button
                     onClick={() => setShowUploadScreen(false)}
-                    className="text-sm text-slate-400 flex items-center gap-1 py-2"
+                    className="text-sm text-neutral-500 flex items-center gap-1 py-2"
                   >
                     ← Home
                   </button>
@@ -947,7 +981,7 @@ export default function App() {
                 <button
                   onClick={() => setShowApartmentEditor(true)}
                   disabled={!currentStop.locationId}
-                  className="w-full text-xs text-slate-400 underline py-2 disabled:text-slate-600 disabled:no-underline disabled:cursor-not-allowed"
+                  className="w-full text-xs text-neutral-500 underline py-2 disabled:text-neutral-700 disabled:no-underline disabled:cursor-not-allowed"
                 >
                   {currentStop.locationId
                     ? '🏢 Edit building intel for this stop'

@@ -1,6 +1,11 @@
 import { checkRateLimit, sendRateLimitResponse } from './_rateLimit.js';
 
-const REQUEST_TIMEOUT_MS = 15000;
+// Bug fix, found alongside the same class of bug in api/ocr.js: reduced
+// from 15000 so the per-chunk worst case (3 attempts + backoff) fits more
+// comfortably within a realistic client timeout budget — see
+// computeOptimizeTimeoutMs in App.jsx, which now scales with route size
+// instead of using one fixed constant for every route from 2 to 100 stops.
+const REQUEST_TIMEOUT_MS = 10000;
 const MAX_RETRIES = 2;
 // Mapbox Matrix API caps each individual request at 25 total coordinates
 // (sources + destinations combined, deduplicated). For routes larger than

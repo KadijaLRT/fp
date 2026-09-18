@@ -136,33 +136,48 @@ export default function ActiveStopCard({
 
   if (!currentStop) {
     return (
-      <div className="max-w-md mx-auto p-4 text-center text-slate-400 text-sm">
+      <div className="max-w-md mx-auto p-4 text-center text-neutral-500 text-sm">
         No active stop. Import a route to get started.
       </div>
     );
   }
 
+  // A real, filling progress bar instead of plain "Stop X of Y" text —
+  // text alone doesn't *feel* like forward motion the way a bar filling
+  // up does, and that feeling was the actual complaint: not that the
+  // number was wrong, but that nothing on screen conveyed progress.
+  const completedCount = Math.max(0, currentStop.stopNumber - 1);
+  const progressPct = totalStops > 0 ? Math.min(100, Math.round((completedCount / totalStops) * 100)) : 0;
+
   return (
     <div className="max-w-md mx-auto p-4">
-      <div className="flex justify-between items-center mb-3 text-xs text-slate-400 font-bold uppercase tracking-wider">
+      <div className="flex justify-between items-center mb-1.5 text-xs text-neutral-500 font-bold uppercase tracking-wider">
         <span>Stop {currentStop.stopNumber} of {totalStops}</span>
-        <span className="bg-emerald-950 text-emerald-300 px-2 py-0.5 rounded-full">🟢 On Schedule</span>
+        <span className="bg-emerald-950 text-emerald-300 px-2 py-0.5 rounded-full normal-case font-semibold tracking-normal">
+          🟢 On Schedule
+        </span>
+      </div>
+      <div className="h-1.5 bg-neutral-900 rounded-full overflow-hidden mb-3">
+        <div
+          className="h-full bg-emerald-500 rounded-full transition-all duration-500"
+          style={{ width: `${progressPct}%` }}
+        />
       </div>
 
       {routeExplanation && (
-        <div className="bg-indigo-950/60 border-l-4 border-indigo-500 p-2.5 rounded-r-md text-xs text-indigo-200 mb-3">
+        <div className="bg-indigo-950/60 border-l-4 border-indigo-500 p-2 rounded-r-md text-xs text-indigo-200 mb-2">
           <strong className="text-indigo-100">Why this order:</strong> {routeExplanation}
         </div>
       )}
 
       {proximity?.arrived && (
-        <div className="bg-emerald-950/60 border-l-4 border-emerald-500 p-2.5 rounded-r-md text-xs text-emerald-200 mb-3 font-semibold">
+        <div className="bg-emerald-950/60 border-l-4 border-emerald-500 p-2 rounded-r-md text-xs text-emerald-200 mb-2 font-semibold">
           📍 You've arrived at this stop
         </div>
       )}
 
       {geoError && !driverPosition && (
-        <div className="bg-slate-800 border-l-4 border-slate-600 p-2 rounded-r-md text-xs text-slate-400 mb-3">
+        <div className="bg-neutral-900 border-l-4 border-neutral-700 p-2 rounded-r-md text-xs text-neutral-500 mb-2">
           {geoError.message}
         </div>
       )}
@@ -171,12 +186,12 @@ export default function ActiveStopCard({
           card was never the right default for an app used mostly at
           night/dawn/dusk; that's a glare/safety issue on its own, not
           something that should require an opt-in to fix. */}
-      <div className="bg-slate-800 rounded-2xl shadow-lg border border-slate-700 p-5">
+      <div className="bg-neutral-900 rounded-2xl shadow-lg border border-neutral-800 p-5">
         <div className="flex justify-between items-start mb-2 gap-2">
-          <h2 className="text-2xl font-bold text-slate-50 leading-tight">
+          <h2 className="text-2xl font-bold text-neutral-50 leading-tight">
             {currentStop.address}
           </h2>
-          <span className="text-base font-mono bg-slate-700 text-slate-200 px-2.5 py-1 rounded-lg font-semibold whitespace-nowrap">
+          <span className="text-base font-mono bg-neutral-800 text-neutral-200 px-2.5 py-1 rounded-lg font-semibold whitespace-nowrap">
             ⏱️ {formatTime(seconds)}
           </span>
         </div>
@@ -192,7 +207,7 @@ export default function ActiveStopCard({
             📦 {currentStop.packageCount || 1} Package(s)
           </span>
           {proximity && !proximity.arrived && (
-            <span className="bg-slate-700 text-slate-300 text-xs font-semibold px-2.5 py-1 rounded-md">
+            <span className="bg-neutral-800 text-neutral-300 text-xs font-semibold px-2.5 py-1 rounded-md">
               📍 {proximity.meters < 1000
                 ? `${Math.round(proximity.meters)} m away`
                 : `${(proximity.meters / 1000).toFixed(1)} km away`}
@@ -228,7 +243,7 @@ export default function ActiveStopCard({
 
         {onSetVehicleZone && currentStop.routeStopId && (
           <div className="mb-3">
-            <p className="text-[11px] font-semibold text-slate-500 uppercase mb-1.5">
+            <p className="text-[11px] font-semibold text-neutral-500 uppercase mb-1.5">
               📦 Where's this in the vehicle?
               {currentStop.vehicleZoneSuggested && ' (suggested)'}
             </p>
@@ -239,8 +254,8 @@ export default function ActiveStopCard({
                   onClick={() => onSetVehicleZone(currentStop.routeStopId, zone.value)}
                   className={`text-[11px] font-semibold px-2 py-1.5 rounded-md min-h-[32px] ${
                     currentStop.vehicleZone === zone.value
-                      ? 'bg-amber-500 text-slate-900'
-                      : 'bg-slate-700 text-slate-300'
+                      ? 'bg-amber-500 text-neutral-950'
+                      : 'bg-neutral-800 text-neutral-300'
                   }`}
                 >
                   {zone.label}
@@ -260,11 +275,11 @@ export default function ActiveStopCard({
           <p role="alert" className="text-xs text-red-400 font-semibold mb-2 text-center">{navError}</p>
         )}
 
-        <div className="space-y-2 mt-4">
+        <div className="space-y-2 mt-3">
           <button
             onClick={() => triggerNavigation()}
             disabled={!hasValidCoords}
-            className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed active:scale-98 text-white font-bold py-3.5 rounded-xl shadow transition-all flex items-center justify-center gap-2 min-h-[48px] text-base"
+            className="w-full bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-800 disabled:text-neutral-600 disabled:cursor-not-allowed active:scale-98 text-neutral-950 font-extrabold py-3.5 rounded-xl transition-all flex items-center justify-center gap-2 min-h-[48px] text-base"
           >
             <span>🧭 NAVIGATE</span>
           </button>
@@ -282,23 +297,35 @@ export default function ActiveStopCard({
             <button
               onClick={handleSkip}
               disabled={actionPending}
-              className="bg-slate-700 hover:bg-slate-600 disabled:opacity-60 text-slate-200 font-semibold py-3 rounded-xl transition-all min-h-[48px]"
+              className="bg-neutral-800 hover:bg-neutral-700 disabled:opacity-60 text-neutral-300 font-semibold py-3 rounded-xl transition-all min-h-[48px]"
             >
               ⏭️ SKIP
             </button>
           </div>
 
           {onReoptimize && (
+            // De-emphasized on purpose: this used to be a full-width red
+            // bar sitting under DELIVERED/SKIP, which made it look like a
+            // persistent alarm rather than an occasional tool — reoptimize
+            // isn't something wrong that needs fixing, it's an available
+            // action a driver reaches for occasionally (running behind, or
+            // stops shifted). Red is reserved for when it's actually doing
+            // something under a real constraint (offline, using
+            // straight-line approximation instead of real driving times).
             <button
               onClick={onReoptimize}
               disabled={isReoptimizing}
-              className="w-full bg-red-950/60 hover:bg-red-900/60 disabled:opacity-60 text-red-300 font-bold py-3 rounded-xl transition-all min-h-[48px] flex items-center justify-center gap-2"
+              className={`w-full text-xs font-semibold py-2 rounded-lg transition-all min-h-[36px] flex items-center justify-center gap-1.5 ${
+                isOnline === false
+                  ? 'bg-red-950/40 text-red-300'
+                  : 'bg-neutral-900 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-300'
+              } disabled:opacity-60`}
             >
               {isReoptimizing
                 ? 'Reoptimizing…'
                 : isOnline === false
-                  ? '🔥 REOPTIMIZE (offline — approximate)'
-                  : '🔥 REOPTIMIZE'}
+                  ? '🔥 Reoptimize (offline — approximate)'
+                  : '🔥 Reoptimize remaining stops'}
             </button>
           )}
         </div>

@@ -49,12 +49,12 @@ export default function AuthScreen({ onAuthenticated }) {
   };
 
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-      <div className="w-full max-w-sm bg-slate-800 rounded-2xl shadow-lg border border-slate-700 p-6">
+    <div className="min-h-screen bg-neutral-950 flex items-center justify-center p-4">
+      <div className="w-full max-w-sm bg-neutral-900 rounded-2xl shadow-lg border border-neutral-800 p-6">
         <h1 className="text-xl font-extrabold text-amber-400 text-center mb-1">
           ⚡ FLEX ROUTE OPTIMIZER
         </h1>
-        <p className="text-xs text-slate-400 text-center mb-6">
+        <p className="text-xs text-neutral-500 text-center mb-6">
           {mode === 'signin' ? 'Sign in to your driver account' : 'Create your driver account'}
         </p>
 
@@ -65,7 +65,7 @@ export default function AuthScreen({ onAuthenticated }) {
               placeholder="Full name"
               value={fullName}
               onChange={(e) => setFullName(e.target.value)}
-              className="w-full h-12 px-4 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+              className="w-full h-12 px-4 rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
               autoComplete="name"
             />
           )}
@@ -74,7 +74,7 @@ export default function AuthScreen({ onAuthenticated }) {
             placeholder="Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            className="w-full h-12 px-4 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+            className="w-full h-12 px-4 rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
             autoComplete="email"
             required
           />
@@ -83,7 +83,7 @@ export default function AuthScreen({ onAuthenticated }) {
             placeholder="Password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            className="w-full h-12 px-4 rounded-xl bg-slate-900 border border-slate-700 text-slate-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
+            className="w-full h-12 px-4 rounded-xl bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-400"
             autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
             required
           />
@@ -95,7 +95,7 @@ export default function AuthScreen({ onAuthenticated }) {
           <button
             type="submit"
             disabled={loading}
-            className="w-full h-12 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:bg-slate-600 text-slate-900 font-bold text-sm active:scale-98 transition-all"
+            className="w-full h-12 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-700 text-neutral-950 font-bold text-sm active:scale-98 transition-all"
           >
             {loading ? 'Please wait…' : mode === 'signin' ? 'Sign In' : 'Create Account'}
           </button>
@@ -106,7 +106,7 @@ export default function AuthScreen({ onAuthenticated }) {
             setMode(mode === 'signin' ? 'signup' : 'signin');
             setError(null);
           }}
-          className="w-full text-xs text-slate-400 mt-4 text-center underline"
+          className="w-full text-xs text-neutral-500 mt-4 text-center underline"
         >
           {mode === 'signin' ? "Don't have an account? Sign up" : 'Already have an account? Sign in'}
         </button>

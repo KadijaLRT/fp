@@ -675,3 +675,167 @@ were — it's threaded through live geocoding/session/Supabase state that
 isn't practical to mock outside a real browser — so it's worth an actual
 click-through on a real device before fully trusting it.
 
+## Batches larger than ~5 screenshots
+
+Searched the codebase directly for a hardcoded cap — there isn't one.
+`OCR_CONCURRENCY` is 3, the Upstash rate limiter (when configured) allows
+10 requests/min; neither is 5. The most likely explanation is external to
+this app's code: Groq's own account-level rate or usage quota, which free
+tiers often restrict more tightly for vision models than text models.
+`api/ocr.js` already retries a 429 server-side with backoff, but that
+only helps *after* a limit is tripped.
+
+Added client-side pacing as a safe hardening regardless of the exact
+cause: a 400ms stagger between successive requests within each worker,
+on top of the existing concurrency-of-3 cap, to reduce the odds of
+tripping a burst-sensitive limit in the first place.
+
+**Caught a real race condition while building this, before it shipped.**
+The first version of the stagger placed the delay *before* each worker
+claimed its next item — which put an `await` between the loop's bounds
+check and the cursor increment. Under concurrency, multiple workers could
+pass the bounds check against a stale cursor value while awaiting, then
+all try to claim past the array's end once they resumed, producing
+`undefined` entries and silently dropping items from larger batches —
+which would have made this exact "breaks down above ~5" symptom *worse*,
+not better. Caught by testing the logic directly before applying it to
+the real file (reproduced the crash on the first version, confirmed the
+fix across batch sizes 1 through 20 with zero drops or duplicates).
+Fixed by claiming the item first (bounds-check + increment with no
+`await` between them), then pacing *after* the claim, before the actual
+work. Double-checked the two pre-existing worker pools elsewhere in the
+codebase (`geocodeAddressBatch`, `upsertLocationBatch`) already followed
+the safe claim-then-await pattern — this race was specific to the new
+stagger, not a pattern bug already lurking elsewhere.
+
+## The actual "check connection" cause: a timeout-budget mismatch
+
+Found by getting the exact error text ("check connection") from a real
+failure and tracing it to its source rather than continuing to guess.
+Confirmed with hard numbers, not speculation:
+
+**`api/ocr.js`:** the server's own worst-case retry time (3 attempts ×
+25000ms + backoff) could reach **76.5 seconds**, while the client gave up
+after **30 seconds**. A single retry alone — 25s plus its 500ms backoff —
+already exceeded the client's entire budget *before the server's second
+attempt even started*. Every screenshot that needed even one retry (a
+normal, expected part of resilient design, not a failure) looked like a
+dead connection to the client while the server was still correctly
+working. This explains why it got worse with more screenshots: more
+images means more statistical chances that at least one hits a transient
+hiccup needing a retry, and each time it does, the client abandons a
+request the server would likely have completed successfully. Fixed by
+reducing the server's per-attempt timeout to 12000ms (worst case now
+37.5s) and raising the client's to 45000ms — 7.5s of real margin, so the
+client now always outlasts the server's own full retry budget.
+
+**`api/optimize.js` had the same bug, worse for larger routes.** Routes
+over 25 stops need multiple chunked Mapbox Matrix requests (see
+`buildFullDurationMatrix`), and each worker in that pool processes
+several chunks *sequentially* — so the actual worst-case time scales with
+route size, while the client used one flat 20-second timeout for every
+route from 2 to 100 stops. For a 55-stop route (5 chunks, 25 block-pairs,
+7 sequential rounds per worker), even a single chunk needing a retry
+(15.5s+ at the old settings) left almost no room before the client gave
+up. This matters directly for the exact routes this conversation has
+been building toward supporting. Fixed with `computeOptimizeTimeoutMs()`
+in `App.jsx`, which scales with the same O(chunks²/concurrency) shape the
+server actually uses (22s for routes ≤25 stops, 34s for 55 stops, 62s for
+the max 100-stop case) instead of guessing at one constant, plus reduced
+the server's own per-chunk timeout from 15000ms to 10000ms so its worst
+case (31.5s) stays comfortably under even the 55-stop client budget.
+
+**Caught a real mistake while making this edit, before it shipped:** an
+early version of the `App.jsx` change accidentally deleted
+`const result = await response.json();` and the closing `);` of the
+surrounding `withTimeout()` call — a `str_replace` operation matched more
+than intended and silently dropped two lines. Caught by re-viewing the
+file immediately after the edit rather than trusting it had applied
+cleanly, before the build step ran (which would have caught it anyway,
+but shouldn't have been the first line of defense). Verified the fix
+directly afterward: `computeOptimizeTimeoutMs` produces the expected
+scaling across the app's full supported route-size range, and the full
+optimize.js regression suite (including a 55-stop trial) still passes
+with the server's reduced timeout.
+
+## Active-route screen redesign — "stuck with nowhere to go"
+
+From a screenshot of a real 41-stop route in progress: large dead space
+above the pace/deadline banners, three stacked full-width action bars
+with no clear primary, and REOPTIMIZE styled like a persistent red alarm
+even with nothing wrong — plain "Stop 12 of 41" text carrying all the
+weight of conveying progress, which text alone doesn't really do.
+
+**Root cause of the dead space, found in `App.jsx`, not
+`ActiveStopCard`:** `<main className="flex-1 flex flex-col
+justify-center">` vertically centers its content in the full viewport
+height — fine for the idle/Home screen (a centered card in otherwise-
+empty space reads intentionally), wrong for a dense working dashboard,
+which should anchor to the top like any other utility app screen. Fixed
+by switching to `justify-start` specifically when a route is active
+(`stops.length > 0`), leaving the idle screen's centering untouched.
+
+**In `ActiveStopCard.jsx`:**
+- Replaced the plain "Stop 12 of 41" text with an actual filling progress
+  bar underneath it — text doesn't *feel* like forward motion, a bar
+  filling up does, which is the direct fix for the "nowhere to go"
+  feeling. Verified the math directly: stop 12 of 41 → 11 completed → 27%
+  filled, matches the rendered output exactly.
+- De-emphasized REOPTIMIZE: was a full-width bar with the same alarming
+  red/dark styling regardless of state, which made an occasional,
+  perfectly normal tool look like a persistent problem. Now a smaller,
+  muted secondary action — red is reserved for when it's actually
+  operating under a real constraint (offline, using straight-line
+  approximation), not shown by default. Verified both states render
+  correctly: muted gray when online, red only when offline.
+- Tightened spacing throughout (banner margins, button section) so the
+  screen reads as a dense, purposeful dashboard rather than sparse
+  fragments floating with large gaps between them.
+
+## Full app redesign — "Dispatch console"
+
+Shown three visual directions (bold/branded, quiet/minimal, night-HUD)
+as mockups before touching any code, to avoid guessing wrong and redoing
+a dozen files. Bold/branded ("Dispatch console") was chosen: near-black
+surfaces, amber as the one bright accent reserved for primary actions,
+bolder typography, tighter letterspacing on brand marks.
+
+**Palette translation applied consistently across all 11 component
+files:** `bg-slate-900 → bg-neutral-950` (page), `bg-slate-800 →
+bg-neutral-900` (cards), `bg-slate-700 → bg-neutral-800` (chips), blue
+primary CTAs → `bg-amber-500` with dark text (amber is a bright fill —
+white text on it fails contrast, a detail worth getting right rather than
+copying the blue-button pattern of white-text-on-color blindly). Kept
+semantic colors where they carry real meaning rather than forcing
+everything to amber: DELIVERED stays emerald (success), danger/offline
+states stay red — only the *primary/brand* accent moved to amber, not
+every use of color in the app.
+
+**Fixed a real, pre-existing inconsistency while at it, not introduced
+by this redesign:** three screens (`ItineraryUpload`, `ManualStopReview`,
+`ApartmentIntelEditor`) were still light-themed from early in the
+project, flagged in this README's history as a known gap but never
+addressed. A "full app redesign" request was the right moment to finally
+close it — converting them to dark was not optional scope creep, since
+leaving three screens light while the rest went dark-and-bold would have
+made the inconsistency worse, not better.
+
+**Also removed something the redesign surfaced, rather than kept it:** a
+first draft of the new `HomeScreen` added a "Last block: $28.40/hr" style
+info card, copying content from the comparison mockups shown earlier.
+That number was never real — no block-history feature actually exists to
+populate it — so it was cut before shipping rather than left in as
+decorative-but-fake UI, the same standard applied when the Compare
+Offers feature's dead "Your stations" display was removed earlier.
+
+Verified with rendered output across every converted screen (not just a
+build check): confirmed the primary CTAs actually render with the amber
+fill, confirmed DELIVERED correctly kept its green semantic color instead
+of being swept into the amber conversion, and confirmed zero `slate-` or
+`gray-` classes remain anywhere in the codebase via a direct grep sweep —
+including catching two places where sequential find-and-replace rules
+partially matched each other's targets and needed a manual fix (an
+unselected parking-difficulty button and the apartment-intel save
+button's disabled state), caught by re-checking the actual file content
+rather than trusting the bulk replacement had applied cleanly everywhere.
+

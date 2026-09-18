@@ -29,7 +29,7 @@ export default function PayRateBanner({ blockPayCents, routeStartedAtMs, onSetBl
     return (
       <button
         onClick={onSetBlockPay}
-        className="w-full max-w-md mx-auto flex justify-center mb-3 text-xs text-slate-400 underline py-1"
+        className="w-full max-w-md mx-auto flex justify-center mb-3 text-xs text-neutral-500 underline py-1"
       >
         + Add this block's pay to see your $/hr pace
       </button>
@@ -42,7 +42,7 @@ export default function PayRateBanner({ blockPayCents, routeStartedAtMs, onSetBl
   if (elapsedSeconds < MIN_ELAPSED_SECONDS_FOR_RATE) {
     return (
       <div className="max-w-md mx-auto mb-3 text-center">
-        <span className="text-xs text-slate-400">
+        <span className="text-xs text-neutral-500">
           Calculating pace… (${blockPayDollars.toFixed(2)} block)
         </span>
       </div>
@@ -56,7 +56,7 @@ export default function PayRateBanner({ blockPayCents, routeStartedAtMs, onSetBl
   return (
     <div className="max-w-md mx-auto mb-3 text-center">
       <span className={`text-lg font-bold ${rateColor}`}>{formatRate(currentRate)}</span>
-      <span className="text-xs text-slate-400 ml-2">
+      <span className="text-xs text-neutral-500 ml-2">
         pace · ${blockPayDollars.toFixed(2)} block
       </span>
     </div>

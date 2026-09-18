@@ -4,7 +4,15 @@ import { parseRawOcrText, emptyStop } from '../utils/ocrTextParser';
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB
 const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif'];
-const UPLOAD_TIMEOUT_MS = 30000;
+// Bug fix: this used to be 30000 (30s), while the server's own worst-case
+// retry time (api/ocr.js, 3 attempts + backoff) could reach ~76.5s at its
+// previous settings — meaning the client gave up on a single retry alone
+// before the server's second attempt had even started, showing "Upload
+// timed out. Check your connection" for what was actually the server
+// still correctly working through its own retry logic. Raised to
+// comfortably exceed the server's new worst case (~37.5s at its reduced
+// REQUEST_TIMEOUT_MS) with real margin for network transit on top.
+const UPLOAD_TIMEOUT_MS = 45000;
 // A single Flex itinerary screenshot typically shows ~15-20 stops before
 // scrolling, so a 55-stop route realistically needs 3-4 images. Processing
 // them with limited concurrency (not all at once) keeps this comfortably
@@ -99,8 +107,31 @@ export default function ItineraryUpload({ onRouteImported }) {
     let cursor = 0;
 
     async function worker() {
-      while (cursor < items.length) {
+      let isFirst = true;
+      while (true) {
+        // Claim the next item atomically (check-then-increment with no
+        // await in between) before doing anything async. A stagger delay
+        // placed *before* this claim (an earlier version of this fix)
+        // created a real race: multiple workers could pass the bounds
+        // check on a stale cursor value while awaiting, then all try to
+        // claim past the array's end once they resumed — producing
+        // `undefined` entries and silently dropping items from larger
+        // batches. Claiming first, then pacing, avoids that entirely.
+        if (cursor >= items.length) break;
         const item = items[cursor++];
+
+        // Small stagger between requests within each worker (not just
+        // limiting concurrency to 3) — complements /api/ocr's existing
+        // server-side retry-with-backoff on a 429, which only kicks in
+        // *after* a rate limit is already tripped. Spacing requests out
+        // reduces the chance of tripping a burst-sensitive limit (Groq's
+        // own account-level quota, not this app's rate limiter) in the
+        // first place, which matters more as batch size grows.
+        if (!isFirst) {
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
+        isFirst = false;
+
         updateBatchItem(item.id, { status: 'processing' });
         const { stops, error: ocrError } = await ocrSingleFile(item.file);
         if (stops) {
@@ -287,16 +318,16 @@ export default function ItineraryUpload({ onRouteImported }) {
 
   return (
     <div className="p-4 max-w-md mx-auto text-center">
-      <div className="border-2 border-dashed border-gray-300 rounded-2xl p-6 bg-gray-50 flex flex-col items-center justify-center">
+      <div className="border-2 border-dashed border-neutral-800 rounded-2xl p-6 bg-neutral-900 flex flex-col items-center justify-center">
         <span className="text-4xl mb-3" aria-hidden="true">📸</span>
-        <h2 className="text-lg font-bold text-gray-800">Upload Flex Itinerary</h2>
-        <p className="text-xs text-gray-500 mt-1 mb-4">
+        <h2 className="text-lg font-bold text-neutral-50">Upload Flex Itinerary</h2>
+        <p className="text-xs text-neutral-500 mt-1 mb-4">
           Choose one or more screenshots of your stop list — a 55-stop route
           usually needs a few, since one screenshot only shows so much
           before scrolling.
         </p>
 
-        <label className="cursor-pointer bg-blue-600 text-white text-sm font-semibold py-3 px-6 rounded-xl shadow-md active:scale-95 transition-all min-h-[48px] flex items-center justify-center">
+        <label className="cursor-pointer bg-amber-500 text-neutral-950 text-sm font-bold py-3 px-6 rounded-xl active:scale-95 transition-all min-h-[48px] flex items-center justify-center">
           {batch.length > 0 ? 'Add More Screenshots' : 'Choose Screenshots'}
           <input
             type="file"
@@ -307,12 +338,12 @@ export default function ItineraryUpload({ onRouteImported }) {
             className="hidden"
           />
         </label>
-        <p className="text-[11px] text-gray-400 mt-2">
+        <p className="text-[11px] text-neutral-600 mt-2">
           Select several at once from your photo library, or add more one batch at a time.
         </p>
 
         {fallbackMode === 'scanning' && (
-          <p className="mt-3 text-xs text-blue-600 font-semibold">Scanning text locally, this can take a moment…</p>
+          <p className="mt-3 text-xs text-amber-500 font-semibold">Scanning text locally, this can take a moment…</p>
         )}
 
         {error && (
@@ -322,20 +353,20 @@ export default function ItineraryUpload({ onRouteImported }) {
         {batch.length > 0 && (
           <div className="w-full mt-4 text-left">
             <div className="flex justify-between items-center mb-2">
-              <p className="text-xs font-bold text-gray-600">
+              <p className="text-xs font-bold text-neutral-300">
                 {successCount} of {batch.length} screenshot{batch.length === 1 ? '' : 's'} processed
                 {pendingCount > 0 ? ` (${pendingCount} in progress…)` : ''}
               </p>
-              <button onClick={handleStartOver} className="text-xs text-gray-400 underline">
+              <button onClick={handleStartOver} className="text-xs text-neutral-600 underline">
                 Start over
               </button>
             </div>
 
             <div className="space-y-1.5 max-h-56 overflow-y-auto">
               {batch.map((item) => (
-                <div key={item.id} className="bg-white rounded-lg border border-gray-200 px-3 py-2 text-xs">
+                <div key={item.id} className="bg-neutral-950 rounded-lg border border-neutral-800 px-3 py-2 text-xs">
                   <div className="flex justify-between items-center">
-                    <span className="truncate flex-1 text-gray-600">{item.file?.name || 'Manually entered'}</span>
+                    <span className="truncate flex-1 text-neutral-300">{item.file?.name || 'Manually entered'}</span>
                     {item.status === 'success' && (
                       <span className="text-emerald-600 font-semibold ml-2 whitespace-nowrap">
                         ✓ {item.stops.length} stops
@@ -345,7 +376,7 @@ export default function ItineraryUpload({ onRouteImported }) {
                       <span className="text-red-500 font-semibold ml-2 whitespace-nowrap">✗ Failed</span>
                     )}
                     {(item.status === 'pending' || item.status === 'processing') && (
-                      <span className="text-slate-400 ml-2 whitespace-nowrap">
+                      <span className="text-neutral-500 ml-2 whitespace-nowrap">
                         ⏳ {item.status === 'processing' ? 'Scanning…' : 'Queued'}
                       </span>
                     )}
@@ -364,17 +395,17 @@ export default function ItineraryUpload({ onRouteImported }) {
                       <div className="flex items-center gap-2">
                         <button
                           onClick={() => handleTryTextScan(item)}
-                          className="text-slate-500 underline text-[11px]"
+                          className="text-neutral-500 underline text-[11px]"
                         >
                           Text scan
                         </button>
                         <button
                           onClick={() => handleManualEntry(item)}
-                          className="text-slate-500 underline text-[11px]"
+                          className="text-neutral-500 underline text-[11px]"
                         >
                           Manual
                         </button>
-                        <button onClick={() => handleRemoveItem(item.id)} className="text-slate-400 text-[11px]">
+                        <button onClick={() => handleRemoveItem(item.id)} className="text-neutral-600 text-[11px]">
                           Remove
                         </button>
                       </div>
@@ -389,7 +420,7 @@ export default function ItineraryUpload({ onRouteImported }) {
                 {errorCount > 0 && (
                   <button
                     onClick={handleRetryFailed}
-                    className="w-full text-xs bg-slate-700 text-white font-semibold py-2.5 rounded-lg min-h-[40px]"
+                    className="w-full text-xs bg-neutral-800 text-neutral-200 font-semibold py-2.5 rounded-lg min-h-[40px]"
                   >
                     Retry {errorCount} failed screenshot{errorCount === 1 ? '' : 's'}
                   </button>
@@ -410,7 +441,7 @@ export default function ItineraryUpload({ onRouteImported }) {
         {batch.length === 0 && (
           <button
             onClick={() => handleManualEntry(null)}
-            className="mt-3 text-xs text-gray-400 underline"
+            className="mt-3 text-xs text-neutral-600 underline"
           >
             Enter stops manually instead
           </button>

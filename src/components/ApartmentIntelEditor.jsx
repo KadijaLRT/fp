@@ -126,12 +126,12 @@ export default function ApartmentIntelEditor({ locationId, onClose, onSaved }) {
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
-      <div className="bg-white w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl px-5 pt-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] max-h-[90vh] overflow-y-auto">
+      <div className="bg-neutral-900 w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl px-5 pt-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] max-h-[90vh] overflow-y-auto">
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-lg font-bold text-gray-900">🏢 Building Intel</h2>
+          <h2 className="text-lg font-bold text-neutral-50">🏢 Building Intel</h2>
           <button
             onClick={onClose}
-            className="text-gray-400 text-2xl leading-none px-2 min-h-[48px] min-w-[48px]"
+            className="text-neutral-500 text-2xl leading-none px-2 min-h-[48px] min-w-[48px]"
             aria-label="Close"
           >
             ×
@@ -139,49 +139,49 @@ export default function ApartmentIntelEditor({ locationId, onClose, onSaved }) {
         </div>
 
         {loading ? (
-          <p className="text-sm text-gray-500 text-center py-8">Loading…</p>
+          <p className="text-sm text-neutral-500 text-center py-8">Loading…</p>
         ) : (
           <div className="space-y-3">
             <div>
-              <label className="text-xs font-semibold text-gray-600 block mb-1">Complex name</label>
+              <label className="text-xs font-semibold text-neutral-400 block mb-1">Complex name</label>
               <input
                 type="text"
                 value={form.complex_name}
                 onChange={(e) => updateField('complex_name', e.target.value)}
-                className="w-full h-12 px-3 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full h-12 px-3 rounded-xl border border-neutral-800 bg-neutral-950 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                 placeholder="e.g. Riverside Commons"
               />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-600 block mb-1">Gate code</label>
+              <label className="text-xs font-semibold text-neutral-400 block mb-1">Gate code</label>
               <input
                 type="text"
                 value={form.gate_code}
                 onChange={(e) => updateField('gate_code', e.target.value)}
-                className="w-full h-12 px-3 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full h-12 px-3 rounded-xl border border-neutral-800 bg-neutral-950 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                 placeholder="e.g. #4821"
               />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-600 block mb-1">Package room location</label>
+              <label className="text-xs font-semibold text-neutral-400 block mb-1">Package room location</label>
               <input
                 type="text"
                 value={form.package_room_location}
                 onChange={(e) => updateField('package_room_location', e.target.value)}
-                className="w-full h-12 px-3 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full h-12 px-3 rounded-xl border border-neutral-800 bg-neutral-950 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                 placeholder="e.g. Behind leasing office, bldg C"
               />
             </div>
 
             <div className="flex items-center justify-between py-1">
-              <label className="text-xs font-semibold text-gray-600">Has elevator</label>
+              <label className="text-xs font-semibold text-neutral-400">Has elevator</label>
               <button
                 type="button"
                 onClick={() => updateField('has_elevator', !form.has_elevator)}
                 className={`w-14 h-8 rounded-full transition-colors relative ${
-                  form.has_elevator ? 'bg-emerald-500' : 'bg-gray-300'
+                  form.has_elevator ? 'bg-emerald-500' : 'bg-neutral-700'
                 }`}
                 aria-pressed={form.has_elevator}
               >
@@ -194,7 +194,7 @@ export default function ApartmentIntelEditor({ locationId, onClose, onSaved }) {
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-600 block mb-1">Parking difficulty</label>
+              <label className="text-xs font-semibold text-neutral-400 block mb-1">Parking difficulty</label>
               <div className="grid grid-cols-3 gap-2">
                 {PARKING_OPTIONS.map((opt) => (
                   <button
@@ -203,8 +203,8 @@ export default function ApartmentIntelEditor({ locationId, onClose, onSaved }) {
                     onClick={() => updateField('parking_difficulty', opt)}
                     className={`py-2.5 rounded-xl text-xs font-semibold capitalize border min-h-[48px] ${
                       form.parking_difficulty === opt
-                        ? 'bg-blue-600 text-white border-blue-600'
-                        : 'bg-white text-gray-600 border-gray-300'
+                        ? 'bg-amber-500 text-neutral-950 border-amber-500'
+                        : 'bg-neutral-950 text-neutral-400 border-neutral-800'
                     }`}
                   >
                     {opt}
@@ -214,36 +214,36 @@ export default function ApartmentIntelEditor({ locationId, onClose, onSaved }) {
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-600 block mb-1">Avg walking time (seconds)</label>
+              <label className="text-xs font-semibold text-neutral-400 block mb-1">Avg walking time (seconds)</label>
               <input
                 type="number"
                 min="0"
                 value={form.avg_walking_seconds}
                 onChange={(e) => updateField('avg_walking_seconds', e.target.value)}
-                className="w-full h-12 px-3 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full h-12 px-3 rounded-xl border border-neutral-800 bg-neutral-950 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                 placeholder="e.g. 90"
               />
             </div>
 
             <div>
-              <label className="text-xs font-semibold text-gray-600 block mb-1">Driver notes</label>
+              <label className="text-xs font-semibold text-neutral-400 block mb-1">Driver notes</label>
               <textarea
                 value={form.driver_notes}
                 onChange={(e) => updateField('driver_notes', e.target.value)}
                 rows={3}
-                className="w-full px-3 py-2 rounded-xl border border-gray-300 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                className="w-full px-3 py-2 rounded-xl border border-neutral-800 bg-neutral-950 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
                 placeholder="e.g. Dog on premises, use side entrance after 6pm"
               />
             </div>
 
             {error && (
-              <p role="alert" className="text-xs text-red-500 font-semibold text-center">{error}</p>
+              <p role="alert" className="text-xs text-red-400 font-semibold text-center">{error}</p>
             )}
 
             <button
               onClick={handleSave}
               disabled={saving}
-              className="w-full h-12 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-gray-300 text-white font-bold text-sm active:scale-98 transition-all mt-2"
+              className="w-full h-12 rounded-xl bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-700 disabled:text-neutral-500 text-neutral-950 font-bold text-sm active:scale-98 transition-all mt-2"
             >
               {saving ? 'Saving…' : 'Save Building Intel'}
             </button>

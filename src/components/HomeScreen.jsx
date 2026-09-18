@@ -1,36 +1,38 @@
 import React from 'react';
 
 /**
- * The first thing a driver sees on opening the app (when there's no route
- * in progress). Previously this was just the bare upload card — felt more
- * like a debug screen than an app. This gives it actual presence: branding
- * plus a clear primary action.
+ * Dispatch-console redesign: near-black background, amber as the sole
+ * bright accent (reserved for the primary action, matching the "amber =
+ * go" convention this whole redesign is built around), bolder/tighter
+ * typography with letterspacing on the brand mark.
  */
 export default function HomeScreen({ onUpload, driverEmail }) {
   return (
-    <div className="max-w-md mx-auto px-4 pt-6 pb-4">
-      <div className="text-center mb-8">
-        <div className="text-5xl mb-2">⚡</div>
-        <h1 className="text-2xl font-extrabold text-slate-50 tracking-tight">Flex Route Optimizer</h1>
-        <p className="text-sm text-slate-400 mt-1">
-          {driverEmail ? `Ready when you are, ${driverEmail.split('@')[0]}.` : 'Fastest route, best rate, every block.'}
-        </p>
+    <div className="max-w-md mx-auto px-4 pt-8 pb-4">
+      <div className="flex items-center gap-2.5 mb-10">
+        <div className="w-9 h-9 bg-amber-500 rounded-lg flex items-center justify-center text-lg">⚡</div>
+        <span className="text-amber-500 font-extrabold text-sm tracking-[0.15em]">FLEX DISPATCH</span>
       </div>
 
-      <div className="space-y-3">
-        <button
-          onClick={onUpload}
-          className="w-full bg-blue-600 hover:bg-blue-700 active:scale-98 rounded-2xl p-5 text-left transition-all shadow-lg"
-        >
-          <div className="flex items-center gap-4">
-            <span className="text-3xl">📸</span>
-            <div>
-              <p className="text-white font-bold text-base">Upload Itinerary</p>
-              <p className="text-blue-100 text-xs mt-0.5">Import your accepted block's stop list</p>
-            </div>
+      <p className="text-neutral-500 text-xs font-semibold tracking-widest uppercase mb-1">
+        {driverEmail ? 'Ready when you are' : 'Fastest route, best rate'}
+      </p>
+      <h1 className="text-2xl font-extrabold text-neutral-50 mb-8">
+        {driverEmail ? driverEmail.split('@')[0] : 'Every block.'}
+      </h1>
+
+      <button
+        onClick={onUpload}
+        className="w-full bg-amber-500 hover:bg-amber-600 active:scale-98 rounded-2xl p-5 text-left transition-all"
+      >
+        <div className="flex items-center gap-4">
+          <span className="text-2xl">📸</span>
+          <div>
+            <p className="text-neutral-950 font-extrabold text-base">Upload itinerary</p>
+            <p className="text-amber-950 text-xs mt-0.5 font-semibold">Import your block's stop list</p>
           </div>
-        </button>
-      </div>
+        </div>
+      </button>
     </div>
   );
 }

@@ -48,7 +48,7 @@ export default function DeadlineBanner({
     return (
       <button
         onClick={onSetDeadline}
-        className="w-full max-w-md mx-auto flex justify-center mb-3 text-xs text-slate-400 underline py-1"
+        className="w-full max-w-md mx-auto flex justify-center mb-3 text-xs text-neutral-500 underline py-1"
       >
         + Set a "must finish by" time
       </button>
@@ -72,7 +72,7 @@ export default function DeadlineBanner({
       <span className={`text-sm font-bold ${STATUS_STYLES[status]}`}>
         ⏰ {STATUS_LABELS[status]} — finishing ~{formatTime(projectedFinishMs)}
       </span>
-      <span className="text-xs text-slate-500 ml-2">(need to be done by {formatTime(deadlineMs)})</span>
+      <span className="text-xs text-neutral-600 ml-2">(need to be done by {formatTime(deadlineMs)})</span>
     </div>
   );
 }
