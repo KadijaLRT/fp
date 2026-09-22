@@ -839,3 +839,155 @@ unselected parking-difficulty button and the apartment-intel save
 button's disabled state), caught by re-checking the actual file content
 rather than trusting the bulk replacement had applied cleanly everywhere.
 
+## List and map views
+
+The card view (`ActiveStopCard`) deliberately shows one stop at a time —
+right for actually driving, useless for planning or double-checking the
+whole manifest. Added two alternate view modes via a segmented toggle
+(Card/List/Map), not replacements for the card — it stays the default,
+since it's still the right view while driving.
+
+- **`StopListView.jsx`** — every stop at once, status at a glance
+  (done/current/upcoming), tap to expand a row for full details. Doesn't
+  let a tap jump the driver's active stop there — the app's completion
+  flow is sequential (`currentIndex`-driven), and a list tap silently
+  reordering "which stop is active" would contradict that without an
+  explicit skip/reoptimize. This is a manifest to review, not a
+  navigation control. Verified directly: all three statuses render
+  correctly, a stop with no valid coordinates shows its warning icon.
+- **`RouteMapView.jsx`** — every stop as a pin on an actual Mapbox GL map,
+  colored by status, with a thin indicative line through them in route
+  order (not road-accurate — that needs the Directions API, a separate
+  cost this doesn't need to justify just to show "roughly this shape").
+  Shows the driver's live position when available. `mapbox-gl` is
+  dynamically imported, same pattern as `tesseract.js` elsewhere in this
+  app — confirmed via the build output that it lands in its own 530KB
+  (gzipped) chunk rather than bloating the main bundle, so sessions that
+  never open Map view never download it. That said, **it's a real,
+  disclosed cost the first time someone does** open it — worth knowing
+  before assuming map view is "free."
+
+**Honest limit on verification here, worth stating plainly:** this is the
+one component in the app that couldn't be meaningfully tested beyond
+"compiles and doesn't crash on mount." There's no browser/WebGL context
+available in this environment to actually render a Mapbox GL map — the
+same class of gap `offlineStore.js`'s IndexedDB usage had earlier in this
+project, but unlike that one (where `fake-indexeddb` turned out to make
+real testing possible), there's no equivalent for WebGL. An SSR render
+confirmed the component doesn't throw on its initial synchronous output,
+but its effect-driven states (error messages, marker updates) never fire
+under `renderToStaticMarkup` — effects don't run in SSR at all, so that
+gap couldn't be closed the way IndexedDB's was. Reviewed the code
+carefully against the mapbox-gl v3 API instead, but this one genuinely
+needs a look on a real device before being trusted the way the rest of
+this codebase has been.
+
+## Vehicle zone chips were invisible, and their fix uncovered a worse bug
+
+"The zones are missing" traced to `ActiveStopCard`'s zone-tagging section
+being gated on `currentStop.routeStopId` — which is only set once
+Supabase persistence succeeds for that stop. Without Supabase configured
+(or if that specific link write failed), the whole feature silently
+vanished with no indication why. `updateVehicleZone()` already safely
+no-ops when `routeStopId` is missing (never throws), so gating visibility
+on persistence succeeding was unnecessarily strict — removed the gate so
+the chips always show and work locally regardless of whether the
+Supabase write can happen.
+
+**That fix would have exposed something worse if shipped alone.**
+`handleSetVehicleZone` matched which stop to update using `routeStopId`
+— but if that's `undefined` for one stop, it's `undefined` for every
+unlinked stop in the route, not just the tapped one. Tapping a zone on
+any single stop would have matched *every* stop sharing that same
+undefined value and silently overwritten all of their zones at once.
+Fixed by matching on `stop.id` instead — always assigned locally
+regardless of Supabase, so it's the only field guaranteed unique per
+stop — while still passing `routeStopId` through for the best-effort
+persistence write.
+
+Verified precisely, not just by eye: ran the old matching logic directly
+against three stops with `routeStopId: undefined` and confirmed it really
+would have overwritten all three (not a theoretical risk — reproduced
+it), then confirmed the fixed version updates only the tapped stop.
+Separately confirmed via rendered output that the chips now actually
+appear without `routeStopId` — a first test came back with a false
+negative from the same HTML-apostrophe-encoding issue ("Where's" render-
+ing as `Where&#x27;s`) hit earlier in this project, caught by checking
+the encoded form directly rather than trusting the first result.
+
+## Geocoding constrained to CT/MA — a real accuracy gap, not just a preference
+
+Checked the actual Mapbox Geocoding call before making any change: zero
+regional bias existed anywhere. That's a genuine correctness risk, not
+theoretical — a short or ambiguous OCR'd address (common; city/state/zip
+frequently gets dropped or garbled in a screenshot) can resolve to a
+same-named street in a completely different state with no warning.
+
+Added a **hard bounding-box filter** (`bbox` in `geocoder.js`) covering
+Connecticut and Massachusetts with margin — this excludes non-matching
+results outright, not just deprioritizes them, which is the stronger and
+correct tool here (Mapbox's `proximity` param only re-ranks candidates,
+it doesn't filter). Configurable via `VITE_GEOCODING_BBOX` if the
+operating territory ever changes. Added `proximity` too, as a secondary
+refinement for cases where multiple valid CT/MA matches exist for one
+query — prefers the driver's live GPS position when available, falling
+back to a fixed Hartford, CT point otherwise.
+
+**Caught a real gap in my own first pass before shipping it:** the
+initial fix used `driverPosition` for proximity with no fallback — but
+the GPS watch deliberately only starts once a route is already active (a
+previous, intentional decision: no location tracking before a driver's
+opted in), meaning `driverPosition` is always `null` at the exact moment
+that matters most — the very first geocoding pass on a fresh import.
+The fix would have silently done nothing on the common path and only
+worked on the rare reoptimize/resume cases where a live position happens
+to already exist. Added the Hartford fallback so the bias is actually
+meaningful where it's needed, not just in the cases where GPS happened to
+already be running.
+
+Verified concretely, not just by eye: confirmed the real request URL
+contains correctly-formatted `bbox`/`proximity` params in Mapbox's exact
+expected order and encoding, checked the bbox coordinates against seven
+real CT/MA cities (including Hartford and Bloomfield specifically) — all
+correctly inside — and three clearly-wrong-state test points (NYC,
+Chicago, LA) — all correctly outside, including NYC right at the
+border. Also confirmed the "no match" error message now correctly
+distinguishes a real out-of-service-area stop from a garbled OCR result,
+rather than showing the same generic failure for both.
+
+## Mapbox running out of API calls — a real, confirmed missing cache
+
+Checked directly before building anything: zero geocoding cache existed
+anywhere in the codebase. Every route import re-geocoded every address
+from scratch, forever — even a stop delivered to yesterday got a brand
+new Mapbox request today. For a driver running regular routes with any
+address overlap (apartment complexes, a recurring residential area —
+common, not an edge case), that's repeated, needless quota burn on
+addresses whose coordinates were already known.
+
+Added `src/utils/geocodeCache.js` — localStorage-backed rather than a new
+Supabase table (no schema migration needed, and the thing that actually
+matters here — the same driver's device producing similar OCR text for
+the same physical stop across different days — is exactly what a
+per-device cache handles well). Keyed on a normalized (trimmed,
+lowercased, whitespace-collapsed) form of the address text so minor OCR
+variance between screenshots doesn't cause a miss on what's really the
+same stop. Entries expire after 90 days rather than being trusted
+forever, since addresses do occasionally get corrected or renamed.
+Wired transparently into `geocodeAddress()` — every existing caller gets
+the benefit automatically, with zero API surface change.
+
+**Deliberately never caches a failure.** Only a result with real
+coordinates gets stored — a transient Mapbox hiccup or a genuinely
+unresolvable address never gets permanently remembered as "this doesn't
+exist," which would be a worse bug than the one this is fixing.
+
+Verified end-to-end with a mocked network, not just the cache module in
+isolation: 4 geocode requests for 2 unique addresses (including a
+whitespace/case variant simulating real OCR inconsistency) produced
+exactly 2 actual Mapbox calls instead of 4 — confirmed the savings are
+real, not just that the cache functions exist. Also re-ran every existing
+edge case (empty address, missing token, no-match-in-service-area) to
+confirm the cache layer is fully transparent and changed no existing
+behavior, only added the skip-when-already-known path in front of it.
+

@@ -241,7 +241,16 @@ export default function ActiveStopCard({
           )}
         </div>
 
-        {onSetVehicleZone && currentStop.routeStopId && (
+        {/* Bug fix: this used to require currentStop.routeStopId to be
+            truthy just to render at all — meaning the entire zone-tagging
+            feature silently vanished whenever Supabase wasn't configured
+            or a stop's DB link hadn't been created, with zero indication
+            why. updateVehicleZone() already safely no-ops when
+            routeStopId is missing (never throws), so gating visibility on
+            persistence succeeding was unnecessarily strict — the chips
+            now always show and work locally regardless of whether the
+            write to Supabase can happen. */}
+        {onSetVehicleZone && (
           <div className="mb-3">
             <p className="text-[11px] font-semibold text-neutral-500 uppercase mb-1.5">
               📦 Where's this in the vehicle?
@@ -251,7 +260,7 @@ export default function ActiveStopCard({
               {VEHICLE_ZONES.map((zone) => (
                 <button
                   key={zone.value}
-                  onClick={() => onSetVehicleZone(currentStop.routeStopId, zone.value)}
+                  onClick={() => onSetVehicleZone(currentStop.id, currentStop.routeStopId, zone.value)}
                   className={`text-[11px] font-semibold px-2 py-1.5 rounded-md min-h-[32px] ${
                     currentStop.vehicleZone === zone.value
                       ? 'bg-amber-500 text-neutral-950'

@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ItineraryUpload from './components/ItineraryUpload';
 import HomeScreen from './components/HomeScreen';
 import ActiveStopCard from './components/ActiveStopCard';
+import StopListView from './components/StopListView';
+import RouteMapView from './components/RouteMapView';
 import AuthScreen from './components/AuthScreen';
 import ApartmentIntelEditor from './components/ApartmentIntelEditor';
 import BlockPayPrompt from './components/BlockPayPrompt';
@@ -80,6 +82,11 @@ export default function App() {
   // started/completed/abandoned) so re-opening the app always starts at
   // Home, not mid-flow.
   const [showUploadScreen, setShowUploadScreen] = useState(false);
+  // Card is the default (right for actually driving); list/map are
+  // alternate views for planning or double-checking the manifest, not
+  // replacements for it. Resets to card whenever a new route starts so a
+  // driver doesn't land on the wrong view mid-route by accident.
+  const [viewMode, setViewMode] = useState('card');
   // "Must finish by" deadline — see DeadlineBanner/DeadlinePrompt. Reset
   // per-route like blockPayCents, since a deadline from a previous block
   // shouldn't silently carry over to a new one.
@@ -349,7 +356,25 @@ export default function App() {
 
       const geoResults = await geocodeAddressBatch(
         rawStops.map((s) => s.address),
-        mapboxToken
+        mapboxToken,
+        5,
+        // Bias ranking toward a real point — doesn't exclude anything
+        // (the hard bbox filter in geocoder.js does that), just improves
+        // which match wins among multiple valid candidates inside the
+        // service area. Prefers live GPS when available, but that watch
+        // deliberately only starts once a route is already active (see
+        // its own comment — no tracking before the driver's opted in),
+        // so it's null during the exact moment that matters most: the
+        // very first geocoding pass on a fresh import. Falls back to a
+        // fixed Hartford, CT point (central to the CT/MA service area)
+        // so the bias is actually meaningful on the common path instead
+        // of silently doing nothing until a reoptimize or resume, the
+        // only cases where a live position happens to already exist.
+        {
+          proximity: driverPosition
+            ? { lat: driverPosition.lat, lng: driverPosition.lng }
+            : { lat: 41.7637, lng: -72.6851 }
+        }
       );
 
       let geocodedStops = rawStops.map((stop, idx) => {
@@ -655,6 +680,7 @@ export default function App() {
         setBlockPayCents(null);
         setDeadlineTime(null);
         setShowUploadScreen(false);
+        setViewMode('card');
         clearCachedRoute();
         alert(completionMessage);
       }
@@ -705,10 +731,19 @@ export default function App() {
     setShowDeadlinePrompt(false);
   }, []);
 
-  const handleSetVehicleZone = useCallback((routeStopId, zone) => {
-    // Optimistic local update so the UI reflects the tap immediately;
-    // the persisted write is best-effort (updateVehicleZone never throws).
-    setStops((prev) => prev.map((s) => (s.routeStopId === routeStopId ? { ...s, vehicleZone: zone } : s)));
+  const handleSetVehicleZone = useCallback((stopId, routeStopId, zone) => {
+    // Bug fix: this used to match which stop to update by routeStopId —
+    // but if Supabase isn't configured (or a specific stop's link write
+    // failed), routeStopId is undefined for potentially *every* stop in
+    // the route, not just the tapped one. Tapping a zone on any single
+    // stop would then match every stop sharing that same undefined value
+    // and overwrite all of their zones at once. stop.id is always
+    // assigned locally regardless of Supabase, so it's the only field
+    // guaranteed unique per stop to match against — routeStopId is still
+    // passed through to updateVehicleZone for the (best-effort, already
+    // safely no-op-on-missing-id) persistence write, just no longer used
+    // for local matching.
+    setStops((prev) => prev.map((s) => (s.id === stopId ? { ...s, vehicleZone: zone } : s)));
     updateVehicleZone(routeStopId, zone);
   }, []);
 
@@ -811,6 +846,7 @@ export default function App() {
     setDeadlineTime(null);
     setShowDeadlinePrompt(false);
     setShowUploadScreen(false);
+    setViewMode('card');
     clearCachedRoute();
   };
 
@@ -948,46 +984,77 @@ export default function App() {
                 {processingError}
               </p>
             )}
-            <PayRateBanner
-              blockPayCents={blockPayCents}
-              routeStartedAtMs={routeStartedAtMs}
-              onSetBlockPay={() => setShowBlockPayPrompt(true)}
-            />
-            <DeadlineBanner
-              routeStartedAtMs={routeStartedAtMs}
-              routeEstDurationSeconds={routeEstDurationSeconds}
-              completedStopCount={completedStops.length}
-              totalStopCount={stops.length}
-              deadlineTime={deadlineTime}
-              onSetDeadline={() => setShowDeadlinePrompt(true)}
-            />
-            <ActiveStopCard
-              currentStop={currentStop}
-              totalStops={stops.length}
-              onCompleteStop={handleCompleteStop}
-              onSkipStop={handleSkipStop}
-              routeExplanation={routeExplanation}
-              driverPosition={driverPosition}
-              geoError={geoError}
-              preferredMapApp={preferredMapApp}
-              onSetVehicleZone={handleSetVehicleZone}
-              onOpenApartmentIntel={() => setShowApartmentEditor(true)}
-              onReoptimize={handleReoptimize}
-              isReoptimizing={isReoptimizing}
-              isOnline={isOnline}
-            />
-            {currentStop && (
-              <div className="max-w-md mx-auto px-4 pb-4 -mt-2">
-                <button
-                  onClick={() => setShowApartmentEditor(true)}
-                  disabled={!currentStop.locationId}
-                  className="w-full text-xs text-neutral-500 underline py-2 disabled:text-neutral-700 disabled:no-underline disabled:cursor-not-allowed"
-                >
-                  {currentStop.locationId
-                    ? '🏢 Edit building intel for this stop'
-                    : '🏢 Building intel unavailable (location not linked)'}
-                </button>
+
+            <div className="max-w-md mx-auto px-4 mb-3">
+              <div className="flex bg-neutral-900 border border-neutral-800 rounded-xl p-1 gap-1">
+                {[
+                  { key: 'card', label: '📋 Card' },
+                  { key: 'list', label: '☰ List' },
+                  { key: 'map', label: '🗺️ Map' }
+                ].map((mode) => (
+                  <button
+                    key={mode.key}
+                    onClick={() => setViewMode(mode.key)}
+                    className={`flex-1 text-xs font-semibold py-2 rounded-lg transition-all ${
+                      viewMode === mode.key ? 'bg-amber-500 text-neutral-950' : 'text-neutral-500'
+                    }`}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
               </div>
+            </div>
+
+            {viewMode === 'list' && <StopListView stops={stops} currentIndex={currentIndex} />}
+
+            {viewMode === 'map' && (
+              <RouteMapView stops={stops} currentIndex={currentIndex} driverPosition={driverPosition} />
+            )}
+
+            {viewMode === 'card' && (
+              <>
+                <PayRateBanner
+                  blockPayCents={blockPayCents}
+                  routeStartedAtMs={routeStartedAtMs}
+                  onSetBlockPay={() => setShowBlockPayPrompt(true)}
+                />
+                <DeadlineBanner
+                  routeStartedAtMs={routeStartedAtMs}
+                  routeEstDurationSeconds={routeEstDurationSeconds}
+                  completedStopCount={completedStops.length}
+                  totalStopCount={stops.length}
+                  deadlineTime={deadlineTime}
+                  onSetDeadline={() => setShowDeadlinePrompt(true)}
+                />
+                <ActiveStopCard
+                  currentStop={currentStop}
+                  totalStops={stops.length}
+                  onCompleteStop={handleCompleteStop}
+                  onSkipStop={handleSkipStop}
+                  routeExplanation={routeExplanation}
+                  driverPosition={driverPosition}
+                  geoError={geoError}
+                  preferredMapApp={preferredMapApp}
+                  onSetVehicleZone={handleSetVehicleZone}
+                  onOpenApartmentIntel={() => setShowApartmentEditor(true)}
+                  onReoptimize={handleReoptimize}
+                  isReoptimizing={isReoptimizing}
+                  isOnline={isOnline}
+                />
+                {currentStop && (
+                  <div className="max-w-md mx-auto px-4 pb-4 -mt-2">
+                    <button
+                      onClick={() => setShowApartmentEditor(true)}
+                      disabled={!currentStop.locationId}
+                      className="w-full text-xs text-neutral-500 underline py-2 disabled:text-neutral-700 disabled:no-underline disabled:cursor-not-allowed"
+                    >
+                      {currentStop.locationId
+                        ? '🏢 Edit building intel for this stop'
+                        : '🏢 Building intel unavailable (location not linked)'}
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
