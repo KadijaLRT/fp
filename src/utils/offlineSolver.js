@@ -3,7 +3,7 @@ import { distanceMeters } from './geolocation.js';
 /**
  * Fallback route solver used only when the network is unreachable and
  * /api/optimize can't be called. Uses straight-line (haversine) distance
- * instead of real driving times, since there's no way to hit the Mapbox
+ * instead of real driving times, since there's no way to hit the routing provider's
  * Matrix API offline — this is explicitly a rougher approximation than the
  * server-side solver, not a full replacement for it. The moment
  * connectivity returns, the app should go back to calling /api/optimize

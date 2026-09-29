@@ -3,24 +3,32 @@ import React, { useEffect, useRef, useState } from 'react';
 /**
  * Shows every stop as a pin on an actual map, colored by status, with a
  * thin line connecting them in route order (indicative, not road-accurate
- * — that would need the Directions API, a separate cost/call this doesn't
- * need to justify just to show "roughly this order"). Complements the
- * card (driving) and list (manifest review) views — this is for "where
- * am I relative to what's left," which neither of those actually shows.
+ * — that would need a directions/routing API, a separate cost/call this
+ * doesn't need to justify just to show "roughly this order"). Complements
+ * the card (driving) and list (manifest review) views — this is for
+ * "where am I relative to what's left," which neither of those actually
+ * shows.
  *
- * mapbox-gl is dynamically imported (large library — no reason to load it
- * for sessions that never switch to map view), same pattern as
- * tesseract.js elsewhere in this app.
+ * maplibre-gl is dynamically imported (large library — no reason to load
+ * it for sessions that never switch to map view), same pattern as
+ * tesseract.js elsewhere in this app. MapLibre is the open-source fork of
+ * Mapbox GL JS from before Mapbox's license change — same rendering
+ * engine and nearly identical API, but it needs no access token and
+ * points at a free vector-tile style (OpenFreeMap, no key, no quota)
+ * instead of a mapbox:// style URL.
  *
  * TESTING NOTE: unlike most of this codebase, this component could not be
  * visually verified — there's no browser/WebGL context available to
- * actually render a Mapbox GL map in this environment, the same class of
- * gap IndexedDB had until a Node-compatible implementation was found for
- * it. No equivalent exists for WebGL. Reviewed carefully against the
- * mapbox-gl v3 API, and the build compiles clean, but this is the one
- * component in the app that's genuinely unverified beyond that — worth
- * an actual look on a real device before trusting it fully.
+ * actually render a MapLibre GL map in this environment, the same class
+ * of gap IndexedDB had until a Node-compatible implementation was found
+ * for it. No equivalent exists for WebGL. Reviewed carefully against the
+ * maplibre-gl API (which mirrors mapbox-gl v2's), and the build compiles
+ * clean, but this is the one component in the app that's genuinely
+ * unverified beyond that — worth an actual look on a real device before
+ * trusting it fully.
  */
+const OPENFREEMAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/dark';
+
 export default function RouteMapView({ stops, currentIndex, driverPosition }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
@@ -29,13 +37,6 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
-    if (!mapboxToken) {
-      setError('Mapbox is not configured.');
-      setLoading(false);
-      return;
-    }
-
     const routableStops = stops.filter((s) => typeof s.lat === 'number' && typeof s.lng === 'number');
     if (routableStops.length === 0) {
       setError('No stops have a valid location to show on the map yet.');
@@ -48,15 +49,13 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
 
     (async () => {
       try {
-        const mapboxgl = (await import('mapbox-gl')).default;
-        await import('mapbox-gl/dist/mapbox-gl.css');
+        const maplibregl = (await import('maplibre-gl')).default;
+        await import('maplibre-gl/dist/maplibre-gl.css');
         if (cancelled || !containerRef.current) return;
 
-        mapboxgl.accessToken = mapboxToken;
-
-        map = new mapboxgl.Map({
+        map = new maplibregl.Map({
           container: containerRef.current,
-          style: 'mapbox://styles/mapbox/dark-v11',
+          style: OPENFREEMAP_STYLE_URL,
           center: [routableStops[0].lng, routableStops[0].lat],
           zoom: 11
         });
@@ -82,7 +81,7 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
             paint: { 'line-color': '#f59e0b', 'line-width': 2, 'line-opacity': 0.4, 'line-dasharray': [1, 1.5] }
           });
 
-          const bounds = new mapboxgl.LngLatBounds();
+          const bounds = new maplibregl.LngLatBounds();
           routableStops.forEach((s) => bounds.extend([s.lng, s.lat]));
           if (driverPosition) bounds.extend([driverPosition.lng, driverPosition.lat]);
           map.fitBounds(bounds, { padding: 48, maxZoom: 15 });
@@ -91,11 +90,11 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
         });
 
         map.on('error', (e) => {
-          console.error('Mapbox GL error:', e);
+          console.error('MapLibre GL error:', e);
           if (!cancelled) setError('Map failed to load.');
         });
       } catch (err) {
-        console.error('Failed to load Mapbox GL:', err);
+        console.error('Failed to load MapLibre GL:', err);
         if (!cancelled) {
           setError('Could not load the map.');
           setLoading(false);
@@ -123,7 +122,7 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
     if (!map || loading) return;
 
     (async () => {
-      const mapboxgl = (await import('mapbox-gl')).default;
+      const maplibregl = (await import('maplibre-gl')).default;
       if (!mapRef.current) return;
 
       markersRef.current.forEach((m) => m.remove());
@@ -144,9 +143,9 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
         el.style.border = '2px solid #0a0a0a';
         el.style.boxShadow = isCurrent ? '0 0 0 4px rgba(245,158,11,0.3)' : 'none';
 
-        const marker = new mapboxgl.Marker({ element: el })
+        const marker = new maplibregl.Marker({ element: el })
           .setLngLat([stop.lng, stop.lat])
-          .setPopup(new mapboxgl.Popup({ offset: 12 }).setText(`${stop.stopNumber}. ${stop.address}`))
+          .setPopup(new maplibregl.Popup({ offset: 12 }).setText(`${stop.stopNumber}. ${stop.address}`))
           .addTo(map);
         markersRef.current.push(marker);
       });
@@ -158,7 +157,9 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
         el.style.borderRadius = '50%';
         el.style.background = '#3b82f6';
         el.style.border = '3px solid white';
-        const marker = new mapboxgl.Marker({ element: el }).setLngLat([driverPosition.lng, driverPosition.lat]).addTo(map);
+        const marker = new maplibregl.Marker({ element: el })
+          .setLngLat([driverPosition.lng, driverPosition.lat])
+          .addTo(map);
         markersRef.current.push(marker);
       }
     })();

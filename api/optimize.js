@@ -7,16 +7,16 @@ import { checkRateLimit, sendRateLimitResponse } from './_rateLimit.js';
 // instead of using one fixed constant for every route from 2 to 100 stops.
 const REQUEST_TIMEOUT_MS = 10000;
 const MAX_RETRIES = 2;
-// Mapbox Matrix API caps each individual request at 25 total coordinates
-// (sources + destinations combined, deduplicated). For routes larger than
-// that we build the full duration matrix out of smaller rectangular
-// sub-matrix requests (see buildFullDurationMatrix) instead of rejecting
-// the route outright — Flex blocks routinely run 30-40 stops.
-const MAPBOX_MAX_COORDS_PER_REQUEST = 25;
-const CHUNK_SIZE = 12; // keeps any two-chunk union comfortably under 25
+// OpenRouteService's free-tier Matrix API caps each request at 50 total
+// locations. For routes larger than that we build the full duration
+// matrix out of smaller rectangular sub-matrix requests (see
+// buildFullDurationMatrix) instead of rejecting the route outright — Flex
+// blocks routinely run 30-40 stops, and some run past 50.
+const ORS_MAX_COORDS_PER_REQUEST = 50;
+const CHUNK_SIZE = 24; // keeps any two-chunk union comfortably under 50
 const MATRIX_FETCH_CONCURRENCY = 4;
 // Hard ceiling so a pathological request can't fan out into hundreds of
-// Mapbox calls and blow the serverless function's time/cost budget.
+// ORS calls and blow the serverless function's time/cost budget.
 const MAX_TOTAL_STOPS = 100;
 
 function withTimeout(promise, ms, label = 'request') {
@@ -41,17 +41,28 @@ function isValidCoord(stop) {
   );
 }
 
-async function fetchMatrixWithRetry(url) {
+async function fetchMatrixWithRetry(body, orsApiKey) {
   let lastError;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
-      const res = await withTimeout(fetch(url), REQUEST_TIMEOUT_MS, 'Mapbox Matrix request');
+      const res = await withTimeout(
+        fetch('https://api.openrouteservice.org/v2/matrix/driving-car', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: orsApiKey
+          },
+          body: JSON.stringify(body)
+        }),
+        REQUEST_TIMEOUT_MS,
+        'OpenRouteService Matrix request'
+      );
       if (!res.ok) {
         const status = res.status;
         const retryable = status === 429 || status >= 500;
         if (!retryable || attempt === MAX_RETRIES) {
-          const body = await res.text().catch(() => '');
-          throw new Error(`Mapbox Matrix API returned ${status}: ${body.slice(0, 200)}`);
+          const responseBody = await res.text().catch(() => '');
+          throw new Error(`OpenRouteService Matrix API returned ${status}: ${responseBody.slice(0, 200)}`);
         }
       } else {
         return await res.json();
@@ -81,32 +92,36 @@ function chunkIndices(n, size) {
  * both chunks' coordinates and points sources/destinations at their
  * respective slices.
  */
-async function fetchMatrixBlock(stops, sourceIdxs, destIdxs, mapboxToken) {
+async function fetchMatrixBlock(stops, sourceIdxs, destIdxs, orsApiKey) {
   const sameBlock = sourceIdxs === destIdxs;
   const combinedIdxs = sameBlock ? sourceIdxs : [...sourceIdxs, ...destIdxs];
-  const coordinatesStr = combinedIdxs.map((idx) => `${stops[idx].lng},${stops[idx].lat}`).join(';');
+  // ORS wants [lng, lat] pairs, same ordering convention as Mapbox.
+  const locations = combinedIdxs.map((idx) => [stops[idx].lng, stops[idx].lat]);
 
   // Sources always occupy positions 0..sourceIdxs.length-1 in the combined
   // coordinate list, whether or not this is a same-block query — no need
   // to branch on sameBlock here (a previous version had a no-op ternary
   // computing the identical expression in both arms).
-  const sourcesParam = sourceIdxs.map((_, i) => i).join(';');
-  const destParam = sameBlock
-    ? destIdxs.map((_, i) => i).join(';')
-    : destIdxs.map((_, i) => sourceIdxs.length + i).join(';');
+  const sourcesParam = sourceIdxs.map((_, i) => i);
+  const destParam = sameBlock ? destIdxs.map((_, i) => i) : destIdxs.map((_, i) => sourceIdxs.length + i);
 
-  const url =
-    `https://api.mapbox.com/directions-matrix/v1/mapbox/driving/${coordinatesStr}` +
-    `?sources=${sourcesParam}&destinations=${destParam}&annotations=duration` +
-    `&access_token=${encodeURIComponent(mapboxToken)}`;
+  const data = await fetchMatrixWithRetry(
+    {
+      locations,
+      sources: sourcesParam,
+      destinations: destParam,
+      metrics: ['duration']
+    },
+    orsApiKey
+  );
 
-  const data = await fetchMatrixWithRetry(url);
-
-  if (data.code && data.code !== 'Ok') {
-    throw new Error(data.message || `Mapbox Matrix block error: ${data.code}`);
+  if (data.error) {
+    throw new Error(
+      typeof data.error === 'string' ? data.error : data.error.message || 'OpenRouteService Matrix block error'
+    );
   }
   if (!Array.isArray(data.durations)) {
-    throw new Error('Mapbox response was missing duration data for a matrix block.');
+    throw new Error('OpenRouteService response was missing duration data for a matrix block.');
   }
 
   return { sourceIdxs, destIdxs, durations: data.durations };
@@ -114,17 +129,17 @@ async function fetchMatrixBlock(stops, sourceIdxs, destIdxs, mapboxToken) {
 
 /**
  * Builds a full N x N duration matrix for an arbitrary number of stops by
- * tiling Mapbox Matrix API calls, each respecting the 25-coordinate cap.
- * Runs blocks with limited concurrency so a 40-stop route (~16 blocks)
- * doesn't fire everything at once and trip Mapbox's rate limit.
+ * tiling OpenRouteService Matrix API calls, each respecting the
+ * 50-coordinate cap. Runs blocks with limited concurrency so a 40-stop
+ * route doesn't fire everything at once and trip ORS's rate limit.
  */
-async function buildFullDurationMatrix(stops, mapboxToken) {
+async function buildFullDurationMatrix(stops, orsApiKey) {
   const n = stops.length;
   const full = Array.from({ length: n }, () => new Array(n).fill(null));
 
-  if (n <= MAPBOX_MAX_COORDS_PER_REQUEST) {
+  if (n <= ORS_MAX_COORDS_PER_REQUEST) {
     const allIdxs = stops.map((_, i) => i);
-    const { durations } = await fetchMatrixBlock(stops, allIdxs, allIdxs, mapboxToken);
+    const { durations } = await fetchMatrixBlock(stops, allIdxs, allIdxs, orsApiKey);
     return durations;
   }
 
@@ -148,7 +163,7 @@ async function buildFullDurationMatrix(stops, mapboxToken) {
           stops,
           sourceIdxs,
           sourceIdxs === destIdxs ? sourceIdxs : destIdxs,
-          mapboxToken
+          orsApiKey
         );
         block.sourceIdxs.forEach((srcGlobal, srcLocal) => {
           block.destIdxs.forEach((destGlobal, destLocal) => {
@@ -207,9 +222,10 @@ function urgencyMultiplier(stop, nowMs) {
 function computeEdgeCost(fromIdx, toIdx, stops, durations, strategy, nowMs) {
   const candidate = stops[toIdx];
   const rawDuration = durations?.[fromIdx]?.[toIdx];
-  // Mapbox returns null for unreachable pairs (e.g. across water with no
-  // bridge). Treat as heavily penalized rather than crashing on NaN math or
-  // silently treating it as "free" (0/undefined).
+  // ORS returns null for unreachable pairs (e.g. across water with no
+  // bridge), same convention Mapbox used. Treat as heavily penalized
+  // rather than crashing on NaN math or silently treating it as "free"
+  // (0/undefined).
   let cost = typeof rawDuration === 'number' ? rawDuration : 6 * 3600; // 6hr penalty
 
   if (strategy === 'simplest' && candidate.stopType === 'apartment') {
@@ -348,7 +364,7 @@ function solveRoute(stops, durations, strategy) {
 }
 
 /**
- * Pure driving-time sum for the final order — raw Mapbox durations only, no
+ * Pure driving-time sum for the final order — raw ORS durations only, no
  * urgency/stop-duration modifiers. This is what gets stored as
  * routes.est_duration_seconds so a later efficiency-score calculation
  * (actual wall-clock time vs. this estimate) is comparing against a real
@@ -375,13 +391,18 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { stops, mapboxToken, strategy = 'fastest' } = req.body || {};
+    const { stops, strategy = 'fastest' } = req.body || {};
+    // Server-side key, never sent to or trusted from the client (unlike the
+    // old mapboxToken which the client passed through in the request body —
+    // ORS keys stay in the serverless environment only).
+    const orsApiKey = process.env.ORS_API_KEY;
 
     if (!Array.isArray(stops) || stops.length < 2) {
       return res.status(400).json({ error: 'At least 2 stops with coordinates are required.' });
     }
-    if (!mapboxToken || typeof mapboxToken !== 'string') {
-      return res.status(400).json({ error: 'Missing Mapbox access token.' });
+    if (!orsApiKey) {
+      console.error('optimize: ORS_API_KEY is not configured on the server.');
+      return res.status(500).json({ error: 'Routing service is not configured on the server.' });
     }
     if (!['fastest', 'least_driving', 'simplest'].includes(strategy)) {
       return res.status(400).json({ error: 'Invalid strategy.' });
@@ -402,10 +423,10 @@ export default async function handler(req, res) {
 
     let durations;
     try {
-      durations = await buildFullDurationMatrix(stops, mapboxToken);
+      durations = await buildFullDurationMatrix(stops, orsApiKey);
     } catch (err) {
       console.error('Failed to build duration matrix:', err);
-      return res.status(502).json({ error: 'Failed to reach Mapbox routing service. Please try again.' });
+      return res.status(502).json({ error: 'Failed to reach the routing service. Please try again.' });
     }
 
     const optimizedOrderIdxs = solveRoute(stops, durations, strategy);

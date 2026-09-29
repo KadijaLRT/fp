@@ -1,8 +1,8 @@
 /**
- * A real gap found by a driver actually running out of Mapbox API calls:
+ * A real gap found by a driver actually hitting a geocoding provider's rate limit:
  * every route import re-geocoded every address from scratch, with zero
  * caching anywhere — even a stop delivered to yesterday got a brand new
- * Mapbox request today. For a driver running regular routes with any
+ * geocoding request today. For a driver running regular routes with any
  * address overlap (very common — apartment complexes, a recurring
  * residential area), that's needless, repeated quota burn for addresses
  * whose coordinates were already known.
@@ -17,14 +17,14 @@
  * if not always byte-identical.
  *
  * Purely an optimization, never a correctness risk: a cache miss falls
- * straight through to Mapbox exactly as before. Nothing here can produce
+ * straight through to the geocoder exactly as before. Nothing here can produce
  * a wrong result it wouldn't already have produced — it can only skip a
  * network call for an address it's already confident about.
  */
 
 const STORAGE_KEY = 'flexGeocodeCache';
 const MAX_ENTRIES = 500;
-// Re-verify with Mapbox periodically rather than trusting a cached
+// Re-verify with the geocoding provider periodically rather than trusting a cached
 // coordinate forever — addresses do occasionally get corrected/renamed,
 // and this bounds how stale a cached entry can get.
 const MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
@@ -90,7 +90,7 @@ export function getCachedGeocode(rawAddress) {
 /**
  * Stores a successful geocode result for future lookups. Only call this
  * for results that actually resolved (never cache a failure — a
- * transient Mapbox hiccup shouldn't get permanently remembered as "this
+ * transient provider hiccup shouldn't get permanently remembered as "this
  * address doesn't exist").
  */
 export function setCachedGeocode(rawAddress, result) {

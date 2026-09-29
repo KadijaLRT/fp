@@ -3,7 +3,7 @@ import { Redis } from '@upstash/redis';
 
 /**
  * Rate limits /api/ocr and /api/optimize — the two endpoints that cost
- * real money per call (Groq inference, Mapbox Matrix requests). Without
+ * real money per call (Groq inference, OpenRouteService Matrix requests). Without
  * this, a retry-loop bug in a client, a misconfigured integration, or
  * straightforward abuse has no ceiling and can run up an unexpected bill.
  *
@@ -25,7 +25,7 @@ if (UPSTASH_URL && UPSTASH_TOKEN) {
 }
 
 // Separate limiters per endpoint since OCR (Groq vision) and optimize
-// (Mapbox Matrix, potentially many chunked requests per call) have very
+// (ORS Matrix, potentially many chunked requests per call) have very
 // different cost profiles per request.
 const limiters = redis
   ? {

@@ -8,7 +8,9 @@ per-location delivery speed over time.
 - React + Vite + Tailwind, packaged as a PWA (`vite-plugin-pwa`)
 - Vercel Serverless Functions (`api/`)
 - Groq SDK for OCR (vision model) and route-shift explanations (reasoning model)
-- Mapbox Geocoding + Matrix APIs
+- US Census Bureau Geocoder (address → lat/lng, free, no API key) + OpenRouteService
+  Matrix API (real driving-time distances) + MapLibre GL (map view, free, no API key)
+  — see "Mapbox removed" below for why and what changed
 - Supabase (Postgres + Auth) for drivers, routes, and location learning
 
 ## Setup
@@ -991,3 +993,82 @@ edge case (empty address, missing token, no-match-in-service-area) to
 confirm the cache layer is fully transparent and changed no existing
 behavior, only added the skip-when-already-known path in front of it.
 
+
+## Mapbox removed — Census Geocoder, OpenRouteService, MapLibre
+
+The driver asked whether the app could run without Mapbox at all, after
+hitting its geocoding quota mid-route once already. Rather than adding
+another cache layer on top of a paid dependency, removed Mapbox entirely
+and replaced each of its three real uses with a free, keyless equivalent.
+Confirmed the exact call sites first (`grep` across `src/` and `api/`
+rather than trusting memory of a long-running project) — exactly three
+files had a real dependency, plus a few files that only mentioned
+"Mapbox" in comments:
+
+1. **Geocoding** (`src/utils/geocoder.js`) — Mapbox Geocoding API →
+   **US Census Bureau Geocoder** (`geocoding.geo.census.gov`, no API key,
+   no billing, no quota for normal driver-scale volume). US-only, which
+   is a non-issue for a CT/MA route. The existing bbox filter, the
+   localStorage cache (`geocodeCache.js`), and the batch-concurrency
+   worker pool all carried over untouched — only the actual network call
+   and response-parsing changed. The Census API returns exactly one best
+   match or none rather than Mapbox's 0–1 relevance score, so confidence
+   is now derived from whether the match resolved to a real TIGER/Line
+   street segment (`tigerLine` present → 90, else → 65) as a rough proxy
+   for the same "flag this for review" behavior.
+
+2. **Driving-time matrix** (`api/optimize.js`) — Mapbox Matrix API →
+   **OpenRouteService Matrix API** (free tier: 2,000 requests/day, 40/min,
+   needs a free API key set as `ORS_API_KEY`). The per-request coordinate
+   cap changed from Mapbox's 25 to ORS's 50, so `CHUNK_SIZE` and the
+   client-side `computeOptimizeTimeoutMs` in `App.jsx` were both updated
+   to match — these two values already had to stay in sync once before
+   (see the timeout-budget-mismatch incident above), so this was checked
+   deliberately rather than assumed. The nearest-neighbor + 2-opt solver
+   itself didn't change at all; it only ever consumed a plain duration
+   matrix, never anything Mapbox-specific. Also moved the routing API key
+   fully server-side — the old code had the client fetch `VITE_MAPBOX_TOKEN`
+   and pass it in the request body to `/api/optimize`, which meant a
+   public (if scoped) token round-tripped through client code for no
+   reason; `ORS_API_KEY` now lives only in the serverless function's
+   environment and is never sent to or accepted from the client.
+
+3. **Map view** (`src/components/RouteMapView.jsx`) — Mapbox GL JS →
+   **MapLibre GL** (the open-source fork of Mapbox GL JS from before
+   Mapbox's license change), rendering **OpenFreeMap** vector tiles
+   (free, unlimited, no key). The two libraries' APIs are close to
+   identical, so this was closer to a rename than a rewrite: `mapboxgl.*`
+   calls became `maplibregl.*` calls with the same method signatures, and
+   the `mapbox://styles/...` style URL became a plain HTTPS URL to an
+   OpenFreeMap style. Confirmed via a real build that MapLibre still
+   lands in its own separate lazy-loaded chunk (same dynamic-import
+   pattern as before), so switching map views still costs nothing for a
+   driver who never opens the Map tab.
+
+Verified this wasn't guesswork against outdated memory of either API:
+pulled the actual Census Geocoder response schema
+(`result.addressMatches[].coordinates.{x,y}`, `.matchedAddress`,
+`.tigerLine`) and the actual ORS Matrix request/response shape
+(`locations`/`sources`/`destinations`/`metrics` in, `durations` matrix
+out, raw API key in the `Authorization` header with no Bearer prefix)
+from current documentation before writing the code that depends on them,
+rather than assuming either matched Mapbox's conventions. Ran a full
+production build afterward (`npm run build`) to confirm everything
+actually compiles with the new dependencies installed, not just that the
+diffs look right.
+
+**What a driver needs to change to pick this up:** get a free
+OpenRouteService API key and set it as `ORS_API_KEY` in the Vercel
+project's environment variables (server-side only, no `VITE_` prefix —
+see `.env.example`). `VITE_MAPBOX_TOKEN` is no longer read anywhere and
+can be removed. No other setup changed — the Census Geocoder and
+OpenFreeMap both need zero configuration.
+
+**What's traded away:** ORS's free tier (2,000 requests/day, 40/min) is
+lower-volume than Mapbox's paid tier was, though still comfortable for
+one driver's daily routes; the Census Geocoder is US-only (irrelevant
+here); and OpenFreeMap's available styles are more limited than Mapbox's
+style catalog, though the dark style already in use maps over directly.
+None of this changes the app's actual behavior for a Flex driver running
+CT/MA routes — it only changes which free/paid external service each
+piece of functionality asks for.

@@ -22,8 +22,8 @@ import { supabase } from './lib/supabaseClient';
 import { getCurrentSession, onAuthStateChange, signOut } from './lib/auth';
 
 // Bug fix: this used to be a flat 20000ms regardless of route size, but
-// /api/optimize's actual work scales with stop count — routes over 25
-// stops need multiple chunked Mapbox Matrix requests (see
+// /api/optimize's actual work scales with stop count — routes over the
+// per-request coordinate cap need multiple chunked Matrix requests (see
 // buildFullDurationMatrix in api/optimize.js), and each worker in that
 // pool processes several chunks *sequentially*. A single fixed timeout
 // can't be right for both a 5-stop route (fast path, one request) and a
@@ -33,17 +33,21 @@ import { getCurrentSession, onAuthStateChange, signOut } from './lib/auth';
 // would have to be uselessly long for small ones. Scales with the same
 // O(chunks²/concurrency) shape the server actually uses, so the timeout
 // tracks the real amount of work being requested instead of guessing.
+// These constants must stay in sync with api/optimize.js's CHUNK_SIZE and
+// ORS_MAX_COORDS_PER_REQUEST — if the server-side values change, update
+// both here to avoid reintroducing the exact timeout-budget mismatch this
+// function was written to fix.
 function computeOptimizeTimeoutMs(stopCount) {
-  const CHUNK_SIZE = 12;
+  const CHUNK_SIZE = 24;
   const CONCURRENCY = 4;
-  const MAPBOX_MAX_COORDS_PER_REQUEST = 25;
+  const ORS_MAX_COORDS_PER_REQUEST = 50;
   const blockPairs =
-    stopCount <= MAPBOX_MAX_COORDS_PER_REQUEST ? 1 : Math.ceil(stopCount / CHUNK_SIZE) ** 2;
+    stopCount <= ORS_MAX_COORDS_PER_REQUEST ? 1 : Math.ceil(stopCount / CHUNK_SIZE) ** 2;
   const roundsPerWorker = Math.ceil(blockPairs / CONCURRENCY);
   // 20s floor (covers the fast path plus a chunk or two needing an actual
-  // retry) + 2s per additional round, comfortably above typical Mapbox
-  // Matrix latency (well under a second per request in practice) with
-  // real margin for the occasional slow/retried one.
+  // retry) + 2s per additional round, comfortably above typical routing
+  // API latency (well under a second per request in practice) with real
+  // margin for the occasional slow/retried one.
   return 20000 + roundsPerWorker * 2000;
 }
 
@@ -349,14 +353,12 @@ export default function App() {
     let persistedRouteId = null;
 
     try {
-      const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
-      if (!mapboxToken) {
-        throw new Error('Mapbox is not configured (VITE_MAPBOX_TOKEN missing).');
-      }
-
+      // geocodeAddressBatch's second param is a leftover positional slot
+      // from the old Mapbox-token signature, kept for compatibility;
+      // the Census Geocoder needs no token, so this is passed as null.
       const geoResults = await geocodeAddressBatch(
         rawStops.map((s) => s.address),
-        mapboxToken,
+        null,
         5,
         // Bias ranking toward a real point — doesn't exclude anything
         // (the hard bbox filter in geocoder.js does that), just improves
@@ -446,7 +448,7 @@ export default function App() {
       const unresolvedCount = geocodedStops.filter((s) => s.lat === null || s.lng === null).length;
 
       // Only send stops with real coordinates into the matrix solver —
-      // Mapbox Matrix will 422 on nulls, and we already validate this
+      // the server will 422 on nulls, and we already validate this
       // server-side, but filtering here avoids a wasted round trip.
       const routableStops = geocodedStops.filter((s) => s.lat !== null && s.lng !== null);
 
@@ -489,7 +491,7 @@ export default function App() {
             fetch('/api/optimize', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ stops: routableStops, mapboxToken })
+              body: JSON.stringify({ stops: routableStops })
             }),
             computeOptimizeTimeoutMs(routableStops.length)
           );
@@ -773,12 +775,11 @@ export default function App() {
 
     if (isOnline) {
       try {
-        const mapboxToken = import.meta.env.VITE_MAPBOX_TOKEN;
         const response = await withTimeout(
           fetch('/api/optimize', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ stops: routableRemaining, mapboxToken })
+            body: JSON.stringify({ stops: routableRemaining })
           }),
           computeOptimizeTimeoutMs(routableRemaining.length)
         );
