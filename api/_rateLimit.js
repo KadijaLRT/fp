@@ -5,7 +5,7 @@ import { Redis } from '@upstash/redis';
  * Rate limits /api/ocr, /api/optimize, and /api/geocode — endpoints that
  * either cost real money per call (Groq inference, OpenRouteService
  * Matrix requests) or proxy a free-but-shared third-party API
- * (/api/geocode → Census Geocoder) that this app shouldn't hammer on
+ * (/api/geocode → OpenCage, which has a real daily quota) that this app shouldn't hammer on
  * behalf of a buggy client. Without this, a retry-loop bug in a client, a
  * misconfigured integration, or straightforward abuse has no ceiling.
  *

@@ -354,8 +354,9 @@ export default function App() {
 
     try {
       // geocodeAddressBatch's second param is a leftover positional slot
-      // from the old Mapbox-token signature, kept for compatibility;
-      // the Census Geocoder needs no token, so this is passed as null.
+      // from the old Mapbox-token signature, kept for compatibility; the
+      // geocoding API key lives server-side only now (never sent to or
+      // accepted from the client), so this is passed as null.
       const geoResults = await geocodeAddressBatch(
         rawStops.map((s) => s.address),
         null,

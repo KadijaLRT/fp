@@ -8,9 +8,10 @@ per-location delivery speed over time.
 - React + Vite + Tailwind, packaged as a PWA (`vite-plugin-pwa`)
 - Vercel Serverless Functions (`api/`)
 - Groq SDK for OCR (vision model) and route-shift explanations (reasoning model)
-- US Census Bureau Geocoder (address → lat/lng, free, no API key) + OpenRouteService
-  Matrix API (real driving-time distances) + MapLibre GL (map view, free, no API key)
-  — see "Mapbox removed" below for why and what changed
+- OpenCage (address → lat/lng, free tier, needs a free API key) + OpenRouteService
+  Matrix API (real driving-time distances, free tier, needs a free API key) +
+  MapLibre GL (map view, free, no API key) — see "Mapbox removed" and
+  "OCR timeouts... Census Geocoder" below for why and what changed
 - Supabase (Postgres + Auth) for drivers, routes, and location learning
 
 ## Setup
@@ -1157,3 +1158,64 @@ code to confirm a 5-digit zip never gets misread as a package count
 right after the number, so a bare zip can't match it — confirmed
 directly, not assumed). All five produced a clean address with no
 metadata bleed-through and no leftover punctuation.
+
+## OCR timeouts: large screenshot payloads, and the Census Geocoder's real problem
+
+Two more real production reports from the same round: "OCR request timed
+out" on several screenshots in a 9-image batch, and the geocoding failure
+from before persisting *even after* the CORS proxy fix was deployed —
+meaning the CORS fix was necessary but not sufficient, and there was a
+second, more fundamental problem underneath it.
+
+**OCR timeouts.** The client was sending full-resolution phone
+screenshots (retina/3x displays routinely produce 1170x2532+ PNGs) as raw
+base64 straight to Groq's vision model, with 3 of these large payloads
+uploading concurrently per the existing batch worker pool. A vision model
+reading on-screen UI text doesn't need retina resolution to do it
+accurately. Added client-side downscaling (max 1600px on the long edge)
+plus re-encoding as JPEG (which compresses flat-color UI content far
+better than PNG) before the image ever leaves the browser. Verified
+against a real screenshot from this project (not a synthetic test image,
+since a real screenshot's compression behavior — anti-aliased text, app
+chrome — doesn't match a synthetic one): 1290x2796 PNG at 266KB became a
+1600px-capped JPEG at 110KB, a genuine 58.5% reduction, with the resized
+image checked visually and confirmed the text stayed fully legible.
+HEIC/HEIF images are passed through unresized (most browsers can't decode
+HEIC to a canvas), and any resize failure falls back to the original
+image rather than blocking the upload.
+
+**The geocoding failure was never actually a bug in the CORS proxy — it
+was the wrong upstream service.** The driver confirmed the CORS fix was
+deployed and the *exact same* "could not be located" failure kept
+happening. That ruled out a leftover code bug and pointed at the Census
+Geocoder itself, so it got checked independently rather than re-reading
+the same proxy code a third time expecting to find something different:
+the Census Bureau's public geocoder has no published SLA and is
+independently documented (see
+https://www.geocod.io/census-bureau-api-down-alternative and the Census
+Bureau's own FAQ) as unreliable under real load — frequent downtime,
+requests that hang without responding, and "inconsistent results" the
+Bureau itself attributes to "processing load." A real route failing
+34-for-34 identically is exactly what a downed or overloaded upstream
+looks like from the outside, regardless of how well-formed the addresses
+are or how correct the proxy in front of it is.
+
+Rather than keep patching around a free service with no reliability
+guarantee, moved off it entirely to OpenCage (free tier: 2,500
+requests/day, needs a free API key, publishes an actual uptime status
+page). Kept the same server-side-proxy architecture (`api/geocode.js`)
+regardless of provider — the CORS-avoidance benefit still applies to any
+provider, and it means a future provider swap only touches this one file
+plus the response-shape mapping in `geocoder.js`, never client call
+sites. OpenCage's `bounds` param does the CT/MA territory filter natively
+server-side now, instead of the Census-era approach of fetching an
+unconstrained match and rejecting it client-side after the fact — a real
+improvement, not just a swap, since an out-of-bounds match is now
+excluded before it's even returned rather than being fetched and then
+discarded. Also picked up a real numeric 0-10 confidence score from
+OpenCage (scaled to this app's existing 0-100 convention), replacing the
+crude tigerLine-presence heuristic the Census response forced.
+
+**What a driver needs to change:** get a free OpenCage API key at
+opencagedata.com/users/sign_up and set it as `OPENCAGE_API_KEY` in
+Vercel's environment variables (server-side, no `VITE_` prefix).

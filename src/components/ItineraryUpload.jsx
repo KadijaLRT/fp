@@ -28,7 +28,7 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
-function convertToBase64(file) {
+function readFileAsDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.readAsDataURL(file);
@@ -41,6 +41,70 @@ function convertToBase64(file) {
     };
     reader.onerror = () => reject(new Error('Failed to read image file.'));
   });
+}
+
+// A real, confirmed contributor to OCR timeouts: modern phones take
+// screenshots at 3x/retina resolution (e.g. 1170x2532 or larger), which
+// as a PNG data URL routinely runs several megabytes — every extra pixel
+// past what a vision model actually needs to read on-screen text just
+// makes the upload slower and Groq's own inference slower, especially
+// under this app's 3-way concurrent batch processing where several large
+// payloads compete at once. A vision model reading UI text doesn't need
+// retina resolution; 1600px on the long edge is comfortably more than
+// enough to read even small text clearly, so screenshots are downscaled
+// (and re-encoded as JPEG, which compresses screenshot-style UI content
+// far better than PNG) before ever being sent. This can only shrink the
+// payload — never changes what text is legible, since screenshots don't
+// have DPI-sensitive fine detail the way a real photo might.
+const MAX_LONG_EDGE_PX = 1600;
+const JPEG_QUALITY = 0.85;
+
+async function convertToBase64(file) {
+  const original = await readFileAsDataUrl(file);
+
+  // HEIC/HEIF can't be drawn to a canvas in most browsers (no native
+  // decode support), so those are sent through unresized rather than
+  // silently producing a blank/broken image — Groq's vision model can
+  // still read the original directly.
+  if (/^data:image\/hei[cf]/i.test(original)) {
+    return original;
+  }
+
+  try {
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Failed to decode image for resizing.'));
+      el.src = original;
+    });
+
+    const longEdge = Math.max(img.width, img.height);
+    if (longEdge <= MAX_LONG_EDGE_PX) {
+      // Already small enough — resizing further would only lose quality
+      // for no real payload-size benefit.
+      return original;
+    }
+
+    const scale = MAX_LONG_EDGE_PX / longEdge;
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(img.width * scale);
+    canvas.height = Math.round(img.height * scale);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return original; // no canvas support — fall back to the original rather than fail the upload
+
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    const resized = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+    // Guard against a canvas that silently failed to encode (some browsers
+    // return a 1x1 transparent PNG data URL on failure rather than
+    // throwing) — if the resized output isn't a real, smaller image,
+    // trust the original instead of shipping something broken.
+    return resized && resized.length > 100 && resized.length < original.length ? resized : original;
+  } catch (err) {
+    // Resizing is purely an optimization — never let a resize failure
+    // block the upload itself. Fall back to the original, full-size image.
+    console.warn('Image resize before OCR failed, using original:', err);
+    return original;
+  }
 }
 
 /**

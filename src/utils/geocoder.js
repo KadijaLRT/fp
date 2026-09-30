@@ -3,28 +3,23 @@ import { getCachedGeocode, setCachedGeocode } from './geocodeCache.js';
 const REQUEST_TIMEOUT_MS = 10000;
 const MAX_RETRIES = 2;
 
-// Bounding box used to reject matches outside the driver's operating
-// territory (minLng,minLat,maxLng,maxLat). The Census Geocoder has no
-// native bbox filter param, so this is applied client-side after a match
-// comes back. Covers CT and MA with margin; a little overlap into
-// NY/RI/NH/VT near the edges is fine and expected. Configurable via env
-// var since an operating territory can change.
+// Bounding box used to constrain matches to the driver's operating
+// territory (minLng,minLat,maxLng,maxLat). OpenCage's `bounds` param takes
+// this natively as a server-side filter (unlike the Census Geocoder,
+// which had no such param and needed this applied client-side after the
+// fact) — passed straight through to /api/geocode as a query param.
+// Covers CT and MA with margin; a little overlap into NY/RI/NH/VT near
+// the edges is fine and expected. Configurable via env var since an
+// operating territory can change.
 const DEFAULT_GEOCODING_BBOX = '-73.75,40.95,-69.90,42.90';
 
-function getGeocodingBbox() {
+function getGeocodingBboxString() {
   const raw = import.meta.env?.VITE_GEOCODING_BBOX || DEFAULT_GEOCODING_BBOX;
   const parts = raw.split(',').map(Number);
   if (parts.length !== 4 || parts.some((n) => Number.isNaN(n))) {
-    const fallbackParts = DEFAULT_GEOCODING_BBOX.split(',').map(Number);
-    return { minLng: fallbackParts[0], minLat: fallbackParts[1], maxLng: fallbackParts[2], maxLat: fallbackParts[3] };
+    return DEFAULT_GEOCODING_BBOX;
   }
-  const [minLng, minLat, maxLng, maxLat] = parts;
-  return { minLng, minLat, maxLng, maxLat };
-}
-
-function isWithinBbox(lat, lng) {
-  const { minLng, minLat, maxLng, maxLat } = getGeocodingBbox();
-  return lat >= minLat && lat <= maxLat && lng >= minLng && lng <= maxLng;
+  return raw;
 }
 
 function withTimeout(promise, ms) {
@@ -37,33 +32,35 @@ function withTimeout(promise, ms) {
 
 /**
  * Geocodes a single address via /api/geocode, a same-origin serverless
- * proxy in front of the US Census Bureau's free public geocoder (no API
- * key, no billing, no quota for normal driver-scale volume). Never
- * throws — always resolves to a result object so a batch of
- * Promise.all() calls (see App.jsx) can't be taken down by one bad
- * address.
+ * proxy in front of OpenCage's geocoding API (free tier: 2,500
+ * requests/day, needs OPENCAGE_API_KEY set server-side). Never throws —
+ * always resolves to a result object so a batch of Promise.all() calls
+ * (see App.jsx) can't be taken down by one bad address.
  *
- * Bug fix: this used to call geocoding.geo.census.gov directly from the
- * browser. That endpoint sends no Access-Control-Allow-Origin header, so
- * every request was silently blocked by CORS before it ever reached the
- * network — a real driver hit this as "None of the 34 address(es) could
- * be located," every single address failing identically regardless of
- * how well-formed it was, which is the signature of a CORS failure, not
- * bad data. Routed through /api/geocode (a server-to-server call has no
- * CORS involved) instead of hitting Census straight from client code.
- *
- * Note: the Census Geocoder only covers US addresses. That's a non-issue
- * for a CT/MA Flex route, but if this app is ever used outside the US,
- * this function needs a different provider (see README for alternatives).
+ * Provider history: this started on Mapbox (paid, ran out of quota mid-
+ * route for a real driver), briefly moved to the free US Census Bureau
+ * Geocoder, then off it again — Census has no published SLA and is
+ * independently documented as unreliable under real load (frequent
+ * downtime, hangs, inconsistent results under "processing load," per the
+ * Census Bureau's own FAQ and third-party reports). A real driver hit
+ * this directly: every address in a route failing identically, which is
+ * the signature of the upstream service being down, not bad address
+ * data. Moved to OpenCage, which publishes an actual uptime status page.
+ * Routed through a server-side proxy regardless of provider — not just
+ * for the CORS issue Census specifically had, but so a future provider
+ * swap only touches api/geocode.js and this file, never client call sites.
  *
  * @param {string} rawAddress
  * @param {string} [_unusedToken] - kept as a positional param for
- *   backward compatibility with existing call sites; the Census Geocoder
- *   needs no token, so this is accepted and ignored rather than forcing
- *   every caller to be updated in lockstep.
- * @param {{ proximity?: { lat: number, lng: number } }} [options] - proximity
- *   is accepted for API compatibility but the Census Geocoder has no
- *   proximity-ranking param, so it currently has no effect on results.
+ *   backward compatibility with existing call sites; the API key lives
+ *   server-side only (never sent to or accepted from the client), so this
+ *   is accepted and ignored rather than forcing every caller to be
+ *   updated in lockstep.
+ * @param {{ proximity?: { lat: number, lng: number } }} [options] -
+ *   proximity is accepted for API compatibility but not currently sent to
+ *   OpenCage (its bounds-based filtering already does the job this app
+ *   needs — a hard territory constraint — better than proximity ranking
+ *   would for a fixed CT/MA service area).
  */
 export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
   const fallback = {
@@ -86,14 +83,14 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
   // apartment complex, same regular stop) previously geocoded
   // successfully skips the network entirely instead of re-requesting a
   // result we already have. A cache miss falls straight through to the
-  // Census Geocoder exactly as before, so this can only reduce calls,
+  // geocoding provider exactly as before, so this can only reduce calls,
   // never change what a fresh lookup would have returned.
   const cached = getCachedGeocode(trimmedAddress);
   if (cached) {
     return { ...cached, error: null };
   }
 
-  const params = new URLSearchParams({ address: trimmedAddress });
+  const params = new URLSearchParams({ address: trimmedAddress, bounds: getGeocodingBboxString() });
   const url = `/api/geocode?${params.toString()}`;
 
   let lastError;
@@ -103,51 +100,49 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
       if (!res.ok) {
         const retryable = res.status === 429 || res.status >= 500;
         if (!retryable || attempt === MAX_RETRIES) {
-          return { ...fallback, error: `Geocoding request failed (${res.status})` };
+          let errorDetail = `Geocoding request failed (${res.status})`;
+          try {
+            const errBody = await res.json();
+            if (errBody?.error) errorDetail = errBody.error;
+          } catch {
+            // Response wasn't JSON — keep the generic status-based message.
+          }
+          return { ...fallback, error: errorDetail };
         }
         await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
         continue;
       }
 
       const data = await res.json();
-      const matches = data?.result?.addressMatches;
+      const results = data?.results;
 
-      if (!Array.isArray(matches) || matches.length === 0) {
-        return { ...fallback, error: 'No match found for this address' };
+      if (!Array.isArray(results) || results.length === 0) {
+        // With `bounds` applied server-side, "no results" can legitimately
+        // mean "this address is outside the configured territory" rather
+        // than "couldn't be read" — OpenCage's bounds param excludes
+        // out-of-area matches entirely rather than returning them for a
+        // client-side check the way the old Census-backed code needed.
+        return { ...fallback, error: 'No match found within the configured service area (CT/MA)' };
       }
 
-      const match = matches[0];
-      const coords = match.coordinates;
-      if (!coords || typeof coords.x !== 'number' || typeof coords.y !== 'number') {
+      const match = results[0];
+      const geometry = match.geometry;
+      if (!geometry || typeof geometry.lat !== 'number' || typeof geometry.lng !== 'number') {
         return { ...fallback, error: 'Malformed geocode response' };
       }
 
-      const lng = coords.x;
-      const lat = coords.y;
-
-      if (!isWithinBbox(lat, lng)) {
-        // Bug-fix note: this mirrors the old Mapbox bbox behavior —
-        // "no match" here can legitimately mean "this address is outside
-        // the configured territory" rather than "couldn't be read",
-        // surfaced distinctly so a driver who genuinely gets a rare
-        // out-of-area stop isn't told the same generic error as a
-        // garbled OCR result.
-        return { ...fallback, error: 'Match found outside the configured service area (CT/MA)' };
-      }
-
-      // The Census Geocoder doesn't return a confidence/relevance score
-      // like Mapbox did. It returns exactly one best match or none, so a
-      // successful match is treated as high-confidence; "tigerLine.side"
-      // presence indicates the match was matched to a real street
-      // segment rather than a rough interpolation, which is used as a
-      // (rough) confidence proxy.
-      const hasStreetMatch = !!match.tigerLine;
-      const confidence = hasStreetMatch ? 90 : 65;
+      // OpenCage's confidence is 0-10 (10 = rooftop-accurate), unlike
+      // Mapbox's 0-1 relevance or Census's binary match/no-match. Scaled
+      // to this app's existing 0-100 confidence convention (used
+      // elsewhere for the "needs review" flag and UI display) so nothing
+      // downstream has to know which provider produced the number.
+      const rawConfidence = typeof match.confidence === 'number' ? match.confidence : 0;
+      const confidence = Math.round((rawConfidence / 10) * 100);
 
       const result = {
-        address: match.matchedAddress || trimmedAddress,
-        lat,
-        lng,
+        address: match.formatted || trimmedAddress,
+        lat: geometry.lat,
+        lng: geometry.lng,
         confidence,
         needsReview: confidence < 80,
         error: null
@@ -166,11 +161,9 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
 }
 
 /**
- * Geocodes a batch of addresses with limited concurrency. The Census
- * Geocoder has no documented hard rate limit for the free onelineaddress
- * endpoint, but this keeps behavior identical to before (and stays a
- * good citizen of a shared free government API) by not firing a 30-stop
- * route's worth of requests all at once.
+ * Geocodes a batch of addresses with limited concurrency, staying well
+ * under OpenCage's free-tier daily quota (2,500/day) and per-second rate
+ * limit for a single driver's realistic route sizes.
  */
 export async function geocodeAddressBatch(addresses, _unusedToken, concurrency = 5, options = {}) {
   const results = new Array(addresses.length);
