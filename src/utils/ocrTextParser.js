@@ -15,11 +15,44 @@
 // words, optionally followed by a city/state/zip fragment. This will miss
 // many real addresses and false-positive on some non-addresses — it exists
 // to give the driver a head start on manual entry, not to be authoritative.
-const ADDRESS_LINE_PATTERN = /\d{1,6}\s+[A-Za-z0-9.,'\s-]{4,60}(?:\b[A-Z]{2}\b\s*\d{5})?/;
+//
+// Bug fix: the previous pattern capped the body at {4,60} characters and
+// excluded common real-address characters (#, /), which meant any address
+// longer than 60 characters — routine once a city/state/zip is appended,
+// e.g. "123 Some Longer Street Name Apt #4B, Springfield, MA 01101" — got
+// hard-truncated mid-word by the regex engine hitting its ceiling, not by
+// anything actually ending the address. A driver reported this directly:
+// addresses were "cut up to the point it becomes incoherent to read."
+// Raised the cap to 120 (generous — real US address lines essentially
+// never exceed this) and widened the character class to include # and /
+// so unit numbers and cross-streets don't prematurely break the match.
+const ADDRESS_LINE_PATTERN = /\d{1,6}\s+[A-Za-z0-9.,'#/\s-]{4,120}(?:\b[A-Z]{2}\b\s*\d{5})?/;
 
 const PACKAGE_COUNT_PATTERN = /(\d+)\s*(?:pkg|pkgs|package|packages|item|items)\b/i;
 
 const TIME_WINDOW_PATTERN = /(\d{1,2}:\d{2}\s*[AP]M\s*[-–to]+\s*\d{1,2}:\d{2}\s*[AP]M|\bby\s+\d{1,2}:\d{2}\s*[AP]M)/i;
+
+// Real Flex screenshots frequently pack the address, package count, and
+// delivery window onto ONE line (e.g. "45 Elm Street Apt 3 • 1 package •
+// by 5:00 PM"), separated by bullets, dashes, or commas — not just on
+// separate lines the way the original block-scanning logic assumed. Since
+// ADDRESS_LINE_PATTERN's character class allows digits and punctuation
+// (needed for unit numbers, zip codes, and cross-streets), it had no way
+// to tell "this is still the address" from "this is package/window
+// metadata that happens to follow the address on the same line" — so it
+// either swallowed the metadata straight into the address text, or (if a
+// separator character like • wasn't in its allowed set) got cut off right
+// at that character. A driver reported real addresses coming out
+// "incoherent," and testing directly against realistic same-line examples
+// confirmed both failure modes.
+//
+// Fixed by finding and removing package-count and time-window matches
+// FIRST, then running the address pattern only against what's left, so
+// address extraction never has to guess where metadata starts — there's
+// simply no metadata text left in the line for it to consume.
+function stripKnownMetadata(text) {
+  return text.replace(PACKAGE_COUNT_PATTERN, ' ').replace(TIME_WINDOW_PATTERN, ' ');
+}
 
 /**
  * Splits raw OCR text into candidate stop blocks and extracts whatever
@@ -71,23 +104,49 @@ export function parseRawOcrText(rawText) {
     return [emptyStop(1)];
   }
 
-  // Flex screenshots typically put package count and delivery window on
-  // separate lines below the address, not inline — so search a small
-  // window of following lines (up to the next address line) rather than
-  // only the address line itself, which would miss them entirely.
+  // Flex screenshots put package count and delivery window either inline
+  // on the address line itself (e.g. "45 Elm St • 1 package • by 5:00 PM")
+  // or on separate lines below it — so package count / delivery window
+  // are searched across a small window of following lines (up to the next
+  // address line) covering both layouts, rather than assuming one or the
+  // other.
   return candidateEntries.map(({ line, index: startIdx }, idx) => {
     const endIdx =
       idx + 1 < candidateEntries.length ? candidateEntries[idx + 1].index : Math.min(lines.length, startIdx + 5);
     const blockLines = lines.slice(startIdx, endIdx);
     const blockText = blockLines.join(' ');
 
-    const addressMatch = line.match(ADDRESS_LINE_PATTERN);
+    // Extract package count and delivery window from the whole block
+    // FIRST, then strip only their matched text out of the address LINE
+    // (not the full block — a genuinely separate line further down stays
+    // untouched) before running the address pattern. This is what stops
+    // "45 Elm Street Apt 3 • 1 package • by 5:00 PM" from having the
+    // package count and time text end up inside the extracted address:
+    // the address pattern never sees them because they're already gone.
     const packageMatch = blockText.match(PACKAGE_COUNT_PATTERN);
     const windowMatch = blockText.match(TIME_WINDOW_PATTERN);
 
+    const addressLineWithoutMetadata = stripKnownMetadata(line)
+      // Metadata is often separated from the address by a bullet, pipe,
+      // comma, or dash (e.g. "45 Elm St • 1 package", "78 Oak Ave, 3
+      // items, 2:00 PM - 4:00 PM"). Once that metadata text is stripped
+      // out, one or more of those separators — possibly several in a row,
+      // each with its own surrounding whitespace, if multiple metadata
+      // fields were chained on the same line — would otherwise be left
+      // dangling at the end (or start) of the address as noise. Repeatedly
+      // strips any trailing/leading run of "separator-plus-whitespace"
+      // rather than just one, so a line with two chained metadata fields
+      // (package count AND time window) doesn't leave a stray leftover
+      // comma or bullet behind after only removing one layer.
+      .replace(/(?:\s*[•|,\-–]\s*)+$/, '')
+      .replace(/^(?:\s*[•|,\-–]\s*)+/, '')
+      .trim();
+
+    const addressMatch = addressLineWithoutMetadata.match(ADDRESS_LINE_PATTERN);
+
     return {
       stopNumber: idx + 1,
-      address: addressMatch ? addressMatch[0].trim() : '',
+      address: addressMatch ? addressMatch[0].trim() : addressLineWithoutMetadata,
       packageCount: packageMatch ? Math.max(1, parseInt(packageMatch[1], 10)) : 1,
       deliveryWindow: windowMatch ? windowMatch[0].trim() : null,
       notes: null,

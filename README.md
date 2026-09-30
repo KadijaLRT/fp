@@ -1072,3 +1072,88 @@ style catalog, though the dark style already in use maps over directly.
 None of this changes the app's actual behavior for a Flex driver running
 CT/MA routes — it only changes which free/paid external service each
 piece of functionality asks for.
+
+## Real production incident: Census Geocoder blocked by CORS, package count stuck at 1, text-scan cutting addresses
+
+Three real bug reports from actual usage, all fixed by root cause rather
+than surface patches.
+
+**"None of the 34 address(es) could be located."** — every single
+address in a real route failing identically was the tell that this
+wasn't bad OCR data; a genuinely-bad address list doesn't fail 34-for-34
+the same way. Checked `geocoding.geo.census.gov`'s response headers
+directly: it sends no `Access-Control-Allow-Origin` header at all, which
+means a browser blocks every cross-origin `fetch()` to it before the
+request is even sent — a silent, total failure that looks identical for
+every address regardless of quality. This app already solves exactly
+this class of problem for Groq and OpenRouteService (both called from
+Vercel serverless functions, never directly from the browser), so the
+fix follows the same pattern: added `api/geocode.js`, a same-origin proxy
+that calls Census server-to-server (no CORS involved between two
+servers) and rate-limited it like every other endpoint. `geocoder.js` now
+calls `/api/geocode?address=...` instead of hitting Census directly.
+
+**Package count stuck at 1 in manual entry.** The input's `onChange` ran
+`Math.max(1, parseInt(e.target.value, 10) || 1)` on every keystroke.
+Selecting the existing digit and typing a replacement passes through an
+empty-string instant — `parseInt('', 10)` is `NaN`, and `NaN || 1`
+snapped the field back to 1 before the new digit could land. Any edit
+that wasn't "append a digit at the end" was effectively blocked. Fixed by
+storing the raw input string as-is while typing (including empty,
+mid-edit) and only clamping to a valid positive integer on blur, with a
+second clamp in `handleConfirm` as a last line of defense so an
+un-blurred or never-touched field can't reach geocoding/Supabase as
+anything but a real number.
+
+**Text-scan addresses "cutting everything up to the point it becomes
+incoherent."** `ADDRESS_LINE_PATTERN` capped the address body at `{4,60}`
+characters and excluded `#` and `/`. Any real address over 60
+characters — routine once city/state/zip is appended, e.g. "123 Some
+Longer Street Name Apt #4B, Springfield, MA 01101" (60 chars) — got
+hard-truncated mid-word by the regex hitting its ceiling, not by
+anything that actually ended the address, and a `#` in a unit number
+could break the match early. Raised the cap to 120 and widened the
+character class to include `#` and `/`. Verified directly (not just by
+inspection) against several realistic multi-line OCR blocks, including
+a 60+ character address, confirming full addresses now come through
+intact with correct package counts and delivery windows attached to the
+right stop.
+
+## Text-scan parser: distinguishing address text from package count and delivery window
+
+Driver asked for the parser to "know the difference between an address,
+the number of packages, and the window for that package to be delivered
+by" — a direct request to fix a specific confusion, not a vague
+"make it better." Tested directly rather than guessing at the failure
+mode: real Flex screenshots often put the address, package count, and
+delivery window all on ONE line (e.g. "45 Elm Street Apt 3 • 1 package •
+by 5:00 PM"), not just on separate lines the way the parser assumed.
+Since `ADDRESS_LINE_PATTERN`'s character class has to allow digits and
+punctuation (needed for unit numbers, zip codes, cross-streets), it had
+no way to tell "this is still the address" from "this is package/window
+text that happens to follow it on the same line" — confirmed directly:
+`"123 Main St, Hartford CT 06103 - 2 packages"` extracted the package
+count straight into the address text, and `"45 Elm Street Apt 3 • 1
+package • by 5:00 PM"` got cut off right at the bullet character.
+
+Fixed by changing the order of extraction: find package count and
+delivery window FIRST (across the whole block, covering both the
+same-line and separate-line layouts), strip only their matched text out
+of the address line, then run the address pattern against what's left —
+so address extraction never has to guess where metadata starts, because
+there's no metadata text left in the line for it to consume. Also strips
+any leftover separator punctuation (bullets, pipes, commas, dashes,
+em-dashes) that metadata removal would otherwise leave dangling at the
+edges of the address — handling one or several chained separators, not
+just one, since a line with both a package count AND a time window
+chained together left a double leftover the first version of this fix
+missed.
+
+Verified against four real-shaped same-line examples (comma-separated,
+bullet-separated, chained package+window, em-dash-separated) plus the
+original separate-line layout as a regression check, plus a bare zip
+code to confirm a 5-digit zip never gets misread as a package count
+(`PACKAGE_COUNT_PATTERN` requires the literal word "package"/"item"
+right after the number, so a bare zip can't match it — confirmed
+directly, not assumed). All five produced a clean address with no
+metadata bleed-through and no leftover punctuation.

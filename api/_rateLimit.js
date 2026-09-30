@@ -2,10 +2,12 @@ import { Ratelimit } from '@upstash/ratelimit';
 import { Redis } from '@upstash/redis';
 
 /**
- * Rate limits /api/ocr and /api/optimize — the two endpoints that cost
- * real money per call (Groq inference, OpenRouteService Matrix requests). Without
- * this, a retry-loop bug in a client, a misconfigured integration, or
- * straightforward abuse has no ceiling and can run up an unexpected bill.
+ * Rate limits /api/ocr, /api/optimize, and /api/geocode — endpoints that
+ * either cost real money per call (Groq inference, OpenRouteService
+ * Matrix requests) or proxy a free-but-shared third-party API
+ * (/api/geocode → Census Geocoder) that this app shouldn't hammer on
+ * behalf of a buggy client. Without this, a retry-loop bug in a client, a
+ * misconfigured integration, or straightforward abuse has no ceiling.
  *
  * Degrades gracefully when Upstash isn't configured: rather than hard-
  * failing every request (which would brick the app for anyone who hasn't
@@ -43,6 +45,15 @@ const limiters = redis
         redis,
         limiter: Ratelimit.slidingWindow(20, '1 m'),
         prefix: 'ratelimit:explain-route'
+      }),
+      // A 55-stop route geocodes up to 55 addresses in one import (plus
+      // cache hits skip this entirely), so this needs real headroom —
+      // set well above a single large route's worst case, but still a
+      // real ceiling against a runaway retry loop.
+      geocode: new Ratelimit({
+        redis,
+        limiter: Ratelimit.slidingWindow(120, '1 m'),
+        prefix: 'ratelimit:geocode'
       })
     }
   : null;

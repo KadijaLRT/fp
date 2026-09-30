@@ -42,7 +42,16 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
   const handleConfirm = () => {
     const trimmed = stops.map((s) => {
       const { _key, ...rest } = s;
-      return { ...rest, address: (s.address || '').trim() };
+      // Bug fix: packageCount was stored as whatever the input's raw
+      // string value was while typing (see the onChange handler below),
+      // so a stop left mid-edit (or never touched) could reach here as
+      // '', undefined, or a non-integer string. Coerced to a valid
+      // positive integer here as a last line of defense, independent of
+      // whatever happened in the input — geocoding/Supabase should never
+      // see anything but a real number.
+      const parsedCount = parseInt(rest.packageCount, 10);
+      const packageCount = Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 1;
+      return { ...rest, address: (s.address || '').trim(), packageCount };
     });
     const validStops = trimmed.filter((s) => s.address.length > 0);
 
@@ -93,8 +102,25 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
               <input
                 type="number"
                 min="1"
+                inputMode="numeric"
+                // Bug fix: this used to run Math.max(1, parseInt(...) || 1)
+                // on every keystroke. Selecting the existing digit and
+                // typing a replacement passes through an empty-string
+                // instant, where parseInt('') is NaN and `NaN || 1`
+                // snapped the field straight back to 1 before the new
+                // digit could land — so the field was effectively stuck
+                // at 1 for any edit that didn't append a digit at the
+                // end. Now the raw string is stored as-is while typing
+                // (including empty, while the driver is mid-edit), and
+                // clamping to a valid positive integer only happens on
+                // blur and again as a final safety net in handleConfirm,
+                // so it never fights a keystroke.
                 value={stop.packageCount}
-                onChange={(e) => updateStop(idx, 'packageCount', Math.max(1, parseInt(e.target.value, 10) || 1))}
+                onChange={(e) => updateStop(idx, 'packageCount', e.target.value)}
+                onBlur={(e) => {
+                  const parsed = parseInt(e.target.value, 10);
+                  updateStop(idx, 'packageCount', Number.isFinite(parsed) && parsed > 0 ? parsed : 1);
+                }}
                 placeholder="Packages"
                 className="h-12 px-3 rounded-lg bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
               />

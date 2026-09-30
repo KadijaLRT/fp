@@ -36,11 +36,21 @@ function withTimeout(promise, ms) {
 }
 
 /**
- * Geocodes a single address via the US Census Bureau's free public
- * geocoder (no API key, no billing, no quota for normal driver-scale
- * volume). Never throws — always resolves to a result object so a batch
- * of Promise.all() calls (see App.jsx) can't be taken down by one bad
+ * Geocodes a single address via /api/geocode, a same-origin serverless
+ * proxy in front of the US Census Bureau's free public geocoder (no API
+ * key, no billing, no quota for normal driver-scale volume). Never
+ * throws — always resolves to a result object so a batch of
+ * Promise.all() calls (see App.jsx) can't be taken down by one bad
  * address.
+ *
+ * Bug fix: this used to call geocoding.geo.census.gov directly from the
+ * browser. That endpoint sends no Access-Control-Allow-Origin header, so
+ * every request was silently blocked by CORS before it ever reached the
+ * network — a real driver hit this as "None of the 34 address(es) could
+ * be located," every single address failing identically regardless of
+ * how well-formed it was, which is the signature of a CORS failure, not
+ * bad data. Routed through /api/geocode (a server-to-server call has no
+ * CORS involved) instead of hitting Census straight from client code.
  *
  * Note: the Census Geocoder only covers US addresses. That's a non-issue
  * for a CT/MA Flex route, but if this app is ever used outside the US,
@@ -83,12 +93,8 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
     return { ...cached, error: null };
   }
 
-  const params = new URLSearchParams({
-    address: trimmedAddress,
-    benchmark: 'Public_AR_Current',
-    format: 'json'
-  });
-  const url = `https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?${params.toString()}`;
+  const params = new URLSearchParams({ address: trimmedAddress });
+  const url = `/api/geocode?${params.toString()}`;
 
   let lastError;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -97,7 +103,7 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
       if (!res.ok) {
         const retryable = res.status === 429 || res.status >= 500;
         if (!retryable || attempt === MAX_RETRIES) {
-          return { ...fallback, error: `Census geocoder returned ${res.status}` };
+          return { ...fallback, error: `Geocoding request failed (${res.status})` };
         }
         await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
         continue;
