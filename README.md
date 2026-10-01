@@ -1219,3 +1219,53 @@ crude tigerLine-presence heuristic the Census response forced.
 **What a driver needs to change:** get a free OpenCage API key at
 opencagedata.com/users/sign_up and set it as `OPENCAGE_API_KEY` in
 Vercel's environment variables (server-side, no `VITE_` prefix).
+
+## The real reason geocoding kept failing: bare addresses with no city/state
+
+The driver confirmed OPENCAGE_API_KEY was set and deployed, and the exact
+same "could not be located" failure persisted anyway — meaning the
+provider swap fixed the reliability problem but not the actual failure
+mode, and there was a third, more specific bug underneath both of the
+previous two.
+
+Checked OpenCage's own documentation for how its `bounds` parameter
+actually works, rather than assuming it behaved like a pre-search filter:
+it's explicitly a POST-match filter — "restrict the possible results,"
+narrowing an already-found candidate list. It does nothing to help the
+underlying search engine resolve an ambiguous query in the first place.
+Real Amazon Flex itinerary screenshots show just a bare street address
+(e.g. "123 Main St"), never a city or state, since the whole route is
+implicitly one metro area on the driver's screen — Groq's OCR prompt
+extracts literally what's visible, so that's exactly what reaches the
+geocoder. A string like "123 Main St" with zero city/state is so globally
+ambiguous — that street name exists in thousands of towns — that most
+geocoders fail to produce any confident match at all before `bounds` ever
+gets a chance to filter anything. That failure looks identical to a
+provider outage from the calling code's side: a clean `200` response with
+an empty results array, not an error — which is exactly why the Census
+Geocoder's actual unreliability and this address-ambiguity problem
+produced the same-looking symptom and had to be told apart carefully
+rather than assumed to be the same root cause twice.
+
+Fixed by appending a default "City, ST" region hint to any address that
+doesn't already specify one, before it's sent to the geocoder — giving
+the search engine's own text matching enough context to do what a human
+reading the driver's screen already does implicitly (know which town the
+route is in). Two real edge cases handled deliberately rather than with a
+single blind "always append city, state":
+- An address that already has a two-letter state (optionally with a zip)
+  is left completely untouched.
+- An address that already names a city but not a state (e.g. "78 Oak Ave,
+  Windsor") only gets the state appended — appending the full default
+  "Hartford, CT" blindly would have produced "78 Oak Ave, Windsor,
+  Hartford, CT," a nonsensical compound of two different towns that's
+  arguably worse than the original bare address, since it actively
+  asserts a contradiction instead of just omitting information.
+
+Configurable via `VITE_GEOCODING_REGION_HINT` (defaults to "Hartford,
+CT," matching this app's existing CT/MA-centered defaults) since a
+driver's actual operating territory can differ. Verified end-to-end with
+a mocked `/api/geocode` response standing in for OpenCage, confirming the
+hint gets built into the outgoing request URL correctly for a bare
+address, a city-only address, and an already-complete address, and that
+each resolves (or correctly passes through unmodified) as expected.

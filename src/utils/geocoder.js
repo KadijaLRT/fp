@@ -22,6 +22,82 @@ function getGeocodingBboxString() {
   return raw;
 }
 
+// Real, confirmed root cause of "could not be located" persisting even
+// after moving off the Census Geocoder onto OpenCage: `bounds` is
+// documented as a POST-match filter, not a pre-search hint — it narrows
+// an already-found candidate list, it doesn't help the underlying search
+// engine resolve an ambiguous query in the first place. Amazon Flex
+// itinerary screenshots show just a bare street address (e.g. "123 Main
+// St"), never a city/state, since the whole route is implicitly in one
+// metro area on the driver's screen — Groq's OCR prompt extracts
+// literally what's on screen, so that's exactly what reaches the
+// geocoder. A string like "123 Main St" with zero city/state context is
+// so globally ambiguous (that street name exists in thousands of towns)
+// that most geocoders — this one included — fail to produce ANY
+// confident match before `bounds` ever gets a chance to filter anything,
+// which is indistinguishable from "this address doesn't exist" from the
+// caller's side: a clean 200 response with an empty results array, not an
+// error. This is why the bbox fix alone didn't resolve it: the box can
+// only narrow a result set that already has candidates in it.
+//
+// Fixed by appending a default city/state/zip region hint to any address
+// that doesn't already look like it has one, before sending it to the
+// geocoder — giving the search engine's own text matching enough context
+// to resolve a bare "123 Main St" the way a human reading the driver's
+// screen already implicitly knows which town it's in. Configurable since
+// a driver's operating territory can change; defaults to this app's
+// existing CT/MA center point.
+const DEFAULT_REGION_HINT = 'Hartford, CT';
+
+// Loose check for "this address string already specifies a state" — a
+// trailing two-letter state abbreviation (optionally followed by a zip).
+// Deliberately permissive (a false positive just means a hint doesn't get
+// appended to an address that didn't need one, which is harmless) rather
+// than trying to exhaustively validate real US geography here.
+const HAS_STATE_PATTERN = /\b[A-Z]{2}\b\s*\d{0,5}\s*$/;
+
+// Separately: does the address already name SOME city, even without a
+// state? ("78 Oak Ave, Windsor"). This matters because blindly appending
+// "Hartford, CT" to that would produce "78 Oak Ave, Windsor, Hartford,
+// CT" — a nonsensical compound of two different towns that's arguably
+// worse for the geocoder than the bare address was, since it now
+// actively asserts a contradiction instead of just omitting information.
+// Detected as "there's a comma, and the text after the last comma isn't
+// itself a street-address fragment (apartment/unit markers, mostly
+// digits)" — loose on purpose, since the cost of a false positive here
+// (skipping the state append for an address that still lacks one) is
+// just falling back to relying on `bounds` alone for that one address,
+// not a hard failure.
+function hasLikelyCity(address) {
+  const parts = address.split(',').map((p) => p.trim()).filter(Boolean);
+  if (parts.length < 2) return false;
+  const lastPart = parts[parts.length - 1];
+  // Reject a trailing fragment that's clearly still part of the street
+  // address, not a city (e.g. "123 Main St, Apt 4" or "123 Main St, #4").
+  const looksLikeUnitFragment = /^(apt|unit|ste|suite|#|\d)/i.test(lastPart);
+  return !looksLikeUnitFragment;
+}
+
+function getRegionHint() {
+  return import.meta.env?.VITE_GEOCODING_REGION_HINT || DEFAULT_REGION_HINT;
+}
+
+function addRegionHintIfMissing(address) {
+  if (HAS_STATE_PATTERN.test(address)) {
+    return address;
+  }
+  const hint = getRegionHint();
+  if (hasLikelyCity(address)) {
+    // A city is already present — only the state (and the hint's own
+    // city, which would be redundant/wrong here) is actually missing.
+    // getRegionHint() is "City, ST" by convention, so just the part after
+    // the comma is appended.
+    const stateOnly = hint.includes(',') ? hint.split(',').slice(1).join(',').trim() : hint;
+    return `${address}, ${stateOnly}`;
+  }
+  return `${address}, ${hint}`;
+}
+
 function withTimeout(promise, ms) {
   let timeoutId;
   const timeout = new Promise((_, reject) => {
@@ -90,7 +166,8 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
     return { ...cached, error: null };
   }
 
-  const params = new URLSearchParams({ address: trimmedAddress, bounds: getGeocodingBboxString() });
+  const queryAddress = addRegionHintIfMissing(trimmedAddress);
+  const params = new URLSearchParams({ address: queryAddress, bounds: getGeocodingBboxString() });
   const url = `/api/geocode?${params.toString()}`;
 
   let lastError;
