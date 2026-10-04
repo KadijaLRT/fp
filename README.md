@@ -1269,3 +1269,58 @@ a mocked `/api/geocode` response standing in for OpenCage, confirming the
 hint gets built into the outgoing request URL correctly for a bare
 address, a city-only address, and an already-complete address, and that
 each resolves (or correctly passes through unmodified) as expected.
+
+## Address editing and manual stop reordering in list view
+
+Added to StopListView (the "☰ List" view mode) rather than the card view,
+since this is a manifest-review action, not a driving action.
+
+**Editing an address** re-geocodes it through the same region-hint-aware
+`geocodeAddress()` used on import (including the bare-address fix above),
+rather than just overwriting the text — a typo fix that silently kept the
+OLD lat/lng would be strictly worse than not allowing edits at all, since
+the UI would show a corrected address string while still navigating
+somewhere else entirely. A manually-edited address also clears its old
+`locationId`/`avgTotalStopSeconds` link rather than carrying over learned
+stop-duration data that belongs to whatever the PREVIOUS address was, not
+this one. No-ops (no geocoding request fired) if the save button is
+pressed without the text actually changing, to avoid burning the driver's
+daily OpenCage quota on an edit that opened and closed without doing
+anything.
+
+**Manual reordering** is deliberately NOT drag-and-drop — up/down buttons
+instead. A touch-drag reorder inside an already-scrollable list is a
+well-documented source of real bugs (the drag gesture and the list's own
+scroll gesture fighting over the same touch events), and this app already
+has a working, unambiguous up/down pattern elsewhere; it didn't need a
+new interaction model invented just for this.
+
+Both actions are scoped more narrowly than "not completed," on purpose:
+- **Editing** is allowed on the current stop and all upcoming stops —
+  only completed stops are locked, since those are historical record.
+- **Reordering** is restricted to STRICTLY upcoming stops — the current
+  stop itself can't be moved by a list reorder, even though it can still
+  be edited. Reasoning: ActiveStopCard, the GPS arrival geofence, and the
+  complete/skip flow all key off `stops[currentIndex]` as a single source
+  of truth for "where the driver is headed right now." Swapping that out
+  from under them via a list-reorder tap (instead of the app's existing,
+  explicit skip-and-requeue flow) would change the driver's actual
+  in-progress destination without any of those systems knowing it
+  happened. Swapping two upcoming stops has no such hazard, since neither
+  one is the active target — confirmed directly with a standalone logic
+  simulation covering every boundary case (moving the current stop,
+  moving a completed stop, moving the first upcoming stop up into the
+  current slot, moving the last stop down past the end) before wiring it
+  into the UI.
+
+Reordering is a pure in-memory array operation with no Supabase write,
+matching the existing skip-and-requeue flow's established pattern — a
+route's `sequence_order` column is written once at import time and
+identifies each DB row by original position, not current display order,
+exactly like skip already relied on.
+
+Added a defensive clear of any open address-edit state when a stop gets
+completed or skipped from the card view while the list view's edit box
+was left open on it — both views are reachable via the same view-mode
+toggle at any time, so this prevents an edit box from being left open on
+a stop that's no longer the active one.

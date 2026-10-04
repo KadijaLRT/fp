@@ -10,7 +10,7 @@ import BlockPayPrompt from './components/BlockPayPrompt';
 import PayRateBanner from './components/PayRateBanner';
 import DeadlinePrompt from './components/DeadlinePrompt';
 import DeadlineBanner from './components/DeadlineBanner';
-import { geocodeAddressBatch } from './utils/geocoder';
+import { geocodeAddress, geocodeAddressBatch } from './utils/geocoder';
 import { watchDriverPosition, distanceMeters } from './utils/geolocation';
 import { parseDeliveryWindowEnd } from './utils/deliveryWindow';
 import { upsertLocationBatch, fetchLocationIntelligence, fetchApartmentIntelPreview } from './lib/locations';
@@ -648,6 +648,12 @@ export default function App() {
     (stopMetrics) => {
       setCompletedStops((prev) => [...prev, stopMetrics]);
       setRouteExplanation(null);
+      // Defensive: if the driver had the list view's edit box open on the
+      // current stop and then completed it from the card view instead
+      // (both are always reachable via the view-mode toggle), clear any
+      // dangling edit state rather than leaving an edit box pointed at a
+      // stop that's no longer the active one.
+      setEditingStopId(null);
 
       // This is the one write in the app that actually feeds the
       // auto-learning trigger (update_location_intelligence fires AFTER
@@ -707,6 +713,7 @@ export default function App() {
       remaining.push(skippedStop);
       return remaining;
     });
+    setEditingStopId(null); // same defensive clear as handleCompleteStop, see its comment
     setRouteExplanation(null);
   }, []);
 
@@ -749,6 +756,117 @@ export default function App() {
     setStops((prev) => prev.map((s) => (s.id === stopId ? { ...s, vehicleZone: zone } : s)));
     updateVehicleZone(routeStopId, zone);
   }, []);
+
+  // Editing an address re-geocodes it (same region-hint-aware geocoder
+  // used on import, so a bare "123 Main St" edit behaves identically to
+  // what a fresh OCR import would have produced) rather than just
+  // overwriting the text and leaving stale/wrong lat/lng behind — a typo
+  // fix that silently kept the OLD coordinates would be worse than not
+  // letting the driver edit at all, since the UI would show a corrected
+  // address string while still navigating to the wrong place.
+  const [editingStopId, setEditingStopId] = useState(null);
+  const [isGeocodingEdit, setIsGeocodingEdit] = useState(false);
+
+  const handleStartEditStop = useCallback((stopId) => {
+    setEditingStopId(stopId);
+  }, []);
+
+  const handleCancelEditStop = useCallback(() => {
+    setEditingStopId(null);
+  }, []);
+
+  const handleSaveEditStop = useCallback(
+    async (stopId, newAddressText) => {
+      const trimmed = (newAddressText || '').trim();
+      if (!trimmed) {
+        setEditingStopId(null);
+        return;
+      }
+
+      const target = stops.find((s) => s.id === stopId);
+      // No-op if the text didn't actually change — avoids burning a
+      // geocoding request (and the driver's daily OpenCage quota) on an
+      // edit that opened the field and closed it without changing
+      // anything.
+      if (!target || target.address === trimmed) {
+        setEditingStopId(null);
+        return;
+      }
+
+      setIsGeocodingEdit(true);
+      try {
+        const geo = await geocodeAddress(trimmed, null, {
+          proximity: driverPosition ? { lat: driverPosition.lat, lng: driverPosition.lng } : undefined
+        });
+
+        setStops((prev) =>
+          prev.map((s) =>
+            s.id === stopId
+              ? {
+                  ...s,
+                  address: geo.address || trimmed,
+                  lat: geo.lat,
+                  lng: geo.lng,
+                  confidence: geo.confidence,
+                  needsReview: geo.needsReview || geo.lat === null,
+                  // A manually-edited address points at a different place
+                  // than whatever it was linked to before — the old
+                  // locationId's learned stop-duration data belongs to the
+                  // PREVIOUS address, not this one, so it's cleared rather
+                  // than silently carried over to a location it was never
+                  // actually observed at. A fresh link (if Supabase is
+                  // configured) happens lazily next time this location is
+                  // imported via OCR; this inline edit path intentionally
+                  // doesn't re-run the full upsert/intel-fetch pipeline for
+                  // a single address tweak.
+                  locationId: null,
+                  avgTotalStopSeconds: null,
+                  isKnownSlowStop: false
+                }
+              : s
+          )
+        );
+
+        if (geo.error) {
+          setProcessingError(`Couldn't verify the new address: ${geo.error}. It's saved but may need review.`);
+        }
+      } finally {
+        setIsGeocodingEdit(false);
+        setEditingStopId(null);
+      }
+    },
+    [stops, driverPosition]
+  );
+
+  // Manual reorder: restricted to stops STRICTLY AFTER currentIndex (the
+  // not-yet-started ones) — not just not-yet-completed. Completed stops
+  // are historical record, not an editable plan, for the reasons
+  // StopListView's doc comment already gives. The current stop itself is
+  // additionally excluded (not just completed ones) because ActiveStopCard,
+  // the GPS arrival geofence, and the "complete/skip" flow all key off
+  // `stops[currentIndex]` as a single source of truth for "where the
+  // driver is headed right now" — silently swapping that out from under
+  // them via a list reorder (rather than the app's existing, explicit
+  // skip-and-requeue flow) would let the driver's actual destination
+  // change without any of those systems knowing. Swapping two *upcoming*
+  // stops has no such hazard, since neither is the active target.
+  const handleReorderStop = useCallback(
+    (stopId, direction) => {
+      setStops((prev) => {
+        const idx = prev.findIndex((s) => s.id === stopId);
+        if (idx === -1 || idx <= currentIndex) return prev;
+
+        const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+        if (targetIdx <= currentIndex || targetIdx >= prev.length) return prev;
+
+        const next = [...prev];
+        [next[idx], next[targetIdx]] = [next[targetIdx], next[idx]];
+        return next;
+      });
+      setRouteExplanation(null); // the route's explanation no longer describes the actual order
+    },
+    [currentIndex]
+  );
 
   // "Emergency Reoptimize" — re-sequences only the *remaining* stops
   // (current position onward; anything already completed stays put).
@@ -1007,7 +1125,18 @@ export default function App() {
               </div>
             </div>
 
-            {viewMode === 'list' && <StopListView stops={stops} currentIndex={currentIndex} />}
+            {viewMode === 'list' && (
+              <StopListView
+                stops={stops}
+                currentIndex={currentIndex}
+                editingStopId={editingStopId}
+                isGeocodingEdit={isGeocodingEdit}
+                onStartEdit={handleStartEditStop}
+                onCancelEdit={handleCancelEditStop}
+                onSaveEdit={handleSaveEditStop}
+                onReorder={handleReorderStop}
+              />
+            )}
 
             {viewMode === 'map' && (
               <RouteMapView stops={stops} currentIndex={currentIndex} driverPosition={driverPosition} />
