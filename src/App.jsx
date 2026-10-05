@@ -1173,6 +1173,19 @@ export default function App() {
                   isOnline={isOnline}
                 />
                 {currentStop && (
+                  <div className="max-w-md mx-auto px-4 -mt-2">
+                    <button
+                      onClick={() => {
+                        handleStartEditStop(currentStop.id);
+                        setViewMode('list');
+                      }}
+                      className="w-full text-sm font-semibold text-amber-400 py-2 min-h-[44px]"
+                    >
+                      ✏️ Edit address / reorder stops
+                    </button>
+                  </div>
+                )}
+                {currentStop && (
                   <div className="max-w-md mx-auto px-4 pb-4 -mt-2">
                     <button
                       onClick={() => setShowApartmentEditor(true)}

@@ -86,13 +86,14 @@ export default function StopListView({
                     : 'bg-neutral-900 border-neutral-800'
               }`}
             >
+              <div className="flex items-center gap-1">
               <button
                 type="button"
                 onClick={() => {
                   if (isEditing) return; // don't collapse out from under an active edit
                   setExpandedId(isExpanded ? null : stop.id);
                 }}
-                className="w-full text-left"
+                className="flex-1 min-w-0 text-left"
               >
                 <div className="flex items-center gap-3">
                   <span
@@ -131,6 +132,41 @@ export default function StopListView({
                   )}
                 </div>
               </button>
+              {isEditable && !isEditing && (
+                <div className="flex-shrink-0 flex items-center">
+                  {isUpcoming && (
+                    <div className="flex flex-col">
+                      <button
+                        type="button"
+                        onClick={() => onReorder(stop.id, 'up')}
+                        disabled={!canMoveUp}
+                        className="w-9 h-6 text-neutral-300 text-sm disabled:opacity-25"
+                        aria-label="Move stop earlier"
+                      >
+                        ▲
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onReorder(stop.id, 'down')}
+                        disabled={!canMoveDown}
+                        className="w-9 h-6 text-neutral-300 text-sm disabled:opacity-25"
+                        aria-label="Move stop later"
+                      >
+                        ▼
+                      </button>
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => onStartEdit(stop.id)}
+                    className="w-11 h-11 text-lg"
+                    aria-label="Edit address"
+                  >
+                    ✏️
+                  </button>
+                </div>
+              )}
+              </div>
 
               {isEditing ? (
                 <div className="mt-2 pt-2 border-t border-neutral-800 space-y-2" onClick={(e) => e.stopPropagation()}>
@@ -171,39 +207,6 @@ export default function StopListView({
                     {stop.vehicleZone && <p>🚗 {stop.vehicleZone.replace(/_/g, ' ')}</p>}
                     {!hasValidCoords(stop) && <p className="text-red-400">⚠️ Address couldn't be located</p>}
 
-                    {isEditable && (
-                      <div className="flex items-center gap-2 pt-1" onClick={(e) => e.stopPropagation()}>
-                        <button
-                          type="button"
-                          onClick={() => onStartEdit(stop.id)}
-                          className="text-[11px] font-semibold text-amber-400 px-2 py-1.5 min-h-[32px]"
-                        >
-                          ✏️ Edit address
-                        </button>
-                        {isUpcoming && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => onReorder(stop.id, 'up')}
-                              disabled={!canMoveUp}
-                              className="text-[11px] font-semibold text-neutral-400 px-2 py-1.5 min-h-[32px] disabled:opacity-30"
-                              aria-label="Move stop earlier"
-                            >
-                              ↑ Move up
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onReorder(stop.id, 'down')}
-                              disabled={!canMoveDown}
-                              className="text-[11px] font-semibold text-neutral-400 px-2 py-1.5 min-h-[32px] disabled:opacity-30"
-                              aria-label="Move stop later"
-                            >
-                              ↓ Move down
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    )}
                   </div>
                 )
               )}
