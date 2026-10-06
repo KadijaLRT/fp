@@ -1,31 +1,19 @@
 import { checkRateLimit, sendRateLimitResponse } from './_rateLimit.js';
 
-// Bug fix, found alongside the same class of bug in api/ocr.js: reduced
-// from 15000 so the per-chunk worst case (3 attempts + backoff) fits more
-// comfortably within a realistic client timeout budget — see
-// computeOptimizeTimeoutMs in App.jsx, which now scales with route size
-// instead of using one fixed constant for every route from 2 to 100 stops.
-const REQUEST_TIMEOUT_MS = 10000;
-const MAX_RETRIES = 2;
-// OpenRouteService's free-tier Matrix API caps each request at 50 total
-// locations. For routes larger than that we build the full duration
-// matrix out of smaller rectangular sub-matrix requests (see
-// buildFullDurationMatrix) instead of rejecting the route outright — Flex
-// blocks routinely run 30-40 stops, and some run past 50.
-const ORS_MAX_COORDS_PER_REQUEST = 50;
-const CHUNK_SIZE = 24; // keeps any two-chunk union comfortably under 50
-const MATRIX_FETCH_CONCURRENCY = 4;
-// Hard ceiling so a pathological request can't fan out into hundreds of
-// ORS calls and blow the serverless function's time/cost budget.
+// No external routing API. Earlier versions called Mapbox, then
+// OpenRouteService, for real driving times; both caused failures (keys,
+// daily quotas, outages) that broke route building mid-shift. Driving
+// time between stops is now estimated locally from coordinates, so
+// optimization has no network dependency, no key, and no quota.
+//
+// Estimate: straight-line (haversine) distance, scaled by a road-
+// circuity factor (real roads are longer than the crow flies; ~1.3-1.4 is
+// the usual figure for suburban street grids), divided by an average
+// delivery-driving speed that already bakes in turns and stop signs.
+const ROAD_CIRCUITY_FACTOR = 1.35;
+const AVG_SPEED_METERS_PER_SEC = 9; // ~32 km/h / 20 mph residential driving
+// Hard ceiling so a pathological request can't blow the function's budget.
 const MAX_TOTAL_STOPS = 100;
-
-function withTimeout(promise, ms, label = 'request') {
-  let timeoutId;
-  const timeout = new Promise((_, reject) => {
-    timeoutId = setTimeout(() => reject(new Error(`${label} timed out`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
-}
 
 function isValidCoord(stop) {
   return (
@@ -41,154 +29,27 @@ function isValidCoord(stop) {
   );
 }
 
-async function fetchMatrixWithRetry(body, orsApiKey) {
-  let lastError;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const res = await withTimeout(
-        fetch('https://api.openrouteservice.org/v2/matrix/driving-car', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: orsApiKey
-          },
-          body: JSON.stringify(body)
-        }),
-        REQUEST_TIMEOUT_MS,
-        'OpenRouteService Matrix request'
-      );
-      if (!res.ok) {
-        const status = res.status;
-        const retryable = status === 429 || status >= 500;
-        if (!retryable || attempt === MAX_RETRIES) {
-          const responseBody = await res.text().catch(() => '');
-          throw new Error(`OpenRouteService Matrix API returned ${status}: ${responseBody.slice(0, 200)}`);
-        }
-      } else {
-        return await res.json();
-      }
-    } catch (err) {
-      lastError = err;
-      if (attempt === MAX_RETRIES) break;
-    }
-    await new Promise((r) => setTimeout(r, 500 * Math.pow(2, attempt)));
-  }
-  throw lastError;
+function haversineMeters(a, b) {
+  const R = 6371000;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const h =
+    Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
 }
 
-function chunkIndices(n, size) {
-  const chunks = [];
-  for (let i = 0; i < n; i += size) {
-    chunks.push(Array.from({ length: Math.min(size, n - i) }, (_, k) => i + k));
-  }
-  return chunks;
-}
-
-/**
- * Fetches one rectangular block of the duration matrix: travel times from
- * every stop in `sourceIdxs` to every stop in `destIdxs`. When the two
- * chunks are the same block, sources and destinations are the same set
- * against a single coordinate list; otherwise the request concatenates
- * both chunks' coordinates and points sources/destinations at their
- * respective slices.
- */
-async function fetchMatrixBlock(stops, sourceIdxs, destIdxs, orsApiKey) {
-  const sameBlock = sourceIdxs === destIdxs;
-  const combinedIdxs = sameBlock ? sourceIdxs : [...sourceIdxs, ...destIdxs];
-  // ORS wants [lng, lat] pairs, same ordering convention as Mapbox.
-  const locations = combinedIdxs.map((idx) => [stops[idx].lng, stops[idx].lat]);
-
-  // Sources always occupy positions 0..sourceIdxs.length-1 in the combined
-  // coordinate list, whether or not this is a same-block query — no need
-  // to branch on sameBlock here (a previous version had a no-op ternary
-  // computing the identical expression in both arms).
-  const sourcesParam = sourceIdxs.map((_, i) => i);
-  const destParam = sameBlock ? destIdxs.map((_, i) => i) : destIdxs.map((_, i) => sourceIdxs.length + i);
-
-  const data = await fetchMatrixWithRetry(
-    {
-      locations,
-      sources: sourcesParam,
-      destinations: destParam,
-      metrics: ['duration']
-    },
-    orsApiKey
-  );
-
-  if (data.error) {
-    throw new Error(
-      typeof data.error === 'string' ? data.error : data.error.message || 'OpenRouteService Matrix block error'
-    );
-  }
-  if (!Array.isArray(data.durations)) {
-    throw new Error('OpenRouteService response was missing duration data for a matrix block.');
-  }
-
-  return { sourceIdxs, destIdxs, durations: data.durations };
-}
-
-/**
- * Builds a full N x N duration matrix for an arbitrary number of stops by
- * tiling OpenRouteService Matrix API calls, each respecting the
- * 50-coordinate cap. Runs blocks with limited concurrency so a 40-stop
- * route doesn't fire everything at once and trip ORS's rate limit.
- */
-async function buildFullDurationMatrix(stops, orsApiKey) {
+/** Full N x N estimated driving-time matrix in seconds (0 on the diagonal). */
+function buildFullDurationMatrix(stops) {
   const n = stops.length;
-  const full = Array.from({ length: n }, () => new Array(n).fill(null));
-
-  if (n <= ORS_MAX_COORDS_PER_REQUEST) {
-    const allIdxs = stops.map((_, i) => i);
-    const { durations } = await fetchMatrixBlock(stops, allIdxs, allIdxs, orsApiKey);
-    return durations;
-  }
-
-  const chunks = chunkIndices(n, CHUNK_SIZE);
-  const blockPairs = [];
-  for (let i = 0; i < chunks.length; i++) {
-    for (let j = 0; j < chunks.length; j++) {
-      blockPairs.push([chunks[i], chunks[j]]);
+  const full = Array.from({ length: n }, () => new Array(n).fill(0));
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const seconds = (haversineMeters(stops[i], stops[j]) * ROAD_CIRCUITY_FACTOR) / AVG_SPEED_METERS_PER_SEC;
+      full[i][j] = seconds;
+      full[j][i] = seconds;
     }
   }
-
-  let cursor = 0;
-  const errors = [];
-
-  async function worker() {
-    while (cursor < blockPairs.length) {
-      const idx = cursor++;
-      const [sourceIdxs, destIdxs] = blockPairs[idx];
-      try {
-        const block = await fetchMatrixBlock(
-          stops,
-          sourceIdxs,
-          sourceIdxs === destIdxs ? sourceIdxs : destIdxs,
-          orsApiKey
-        );
-        block.sourceIdxs.forEach((srcGlobal, srcLocal) => {
-          block.destIdxs.forEach((destGlobal, destLocal) => {
-            full[srcGlobal][destGlobal] = block.durations[srcLocal][destLocal];
-          });
-        });
-      } catch (err) {
-        errors.push(err);
-      }
-    }
-  }
-
-  const workers = Array.from({ length: Math.min(MATRIX_FETCH_CONCURRENCY, blockPairs.length) }, worker);
-  await Promise.all(workers);
-
-  if (errors.length > 0) {
-    console.error(`buildFullDurationMatrix: ${errors.length}/${blockPairs.length} blocks failed`, errors[0]);
-    // Partial failure is tolerable — solveRoute already treats a missing
-    // (null) duration as a heavily-penalized-but-not-fatal edge. Only bail
-    // out entirely if every block failed, since then the matrix is useless.
-    if (errors.length === blockPairs.length) {
-      throw errors[0];
-    }
-  }
-
   return full;
 }
 
@@ -222,8 +83,7 @@ function urgencyMultiplier(stop, nowMs) {
 function computeEdgeCost(fromIdx, toIdx, stops, durations, strategy, nowMs) {
   const candidate = stops[toIdx];
   const rawDuration = durations?.[fromIdx]?.[toIdx];
-  // ORS returns null for unreachable pairs (e.g. across water with no
-  // bridge), same convention Mapbox used. Treat as heavily penalized
+  // A missing/non-numeric duration is treated as heavily penalized
   // rather than crashing on NaN math or silently treating it as "free"
   // (0/undefined).
   let cost = typeof rawDuration === 'number' ? rawDuration : 6 * 3600; // 6hr penalty
@@ -392,17 +252,9 @@ export default async function handler(req, res) {
 
   try {
     const { stops, strategy = 'fastest' } = req.body || {};
-    // Server-side key, never sent to or trusted from the client (unlike the
-    // old mapboxToken which the client passed through in the request body —
-    // ORS keys stay in the serverless environment only).
-    const orsApiKey = process.env.ORS_API_KEY;
 
     if (!Array.isArray(stops) || stops.length < 2) {
       return res.status(400).json({ error: 'At least 2 stops with coordinates are required.' });
-    }
-    if (!orsApiKey) {
-      console.error('optimize: ORS_API_KEY is not configured on the server.');
-      return res.status(500).json({ error: 'Routing service is not configured on the server.' });
     }
     if (!['fastest', 'least_driving', 'simplest'].includes(strategy)) {
       return res.status(400).json({ error: 'Invalid strategy.' });
@@ -421,13 +273,7 @@ export default async function handler(req, res) {
       });
     }
 
-    let durations;
-    try {
-      durations = await buildFullDurationMatrix(stops, orsApiKey);
-    } catch (err) {
-      console.error('Failed to build duration matrix:', err);
-      return res.status(502).json({ error: 'Failed to reach the routing service. Please try again.' });
-    }
+    const durations = buildFullDurationMatrix(stops);
 
     const optimizedOrderIdxs = solveRoute(stops, durations, strategy);
     const optimizedStops = optimizedOrderIdxs.map((idx) => stops[idx]);

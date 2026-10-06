@@ -314,14 +314,34 @@ export default function ItineraryUpload({ onRouteImported }) {
       // `undefined` there — every text-scan attempt threw a TypeError
       // immediately and was silently swallowed by the catch block below,
       // always reporting "text scan also failed" regardless of the image.
-      const { default: Tesseract } = await import('tesseract.js');
-      const { data } = await Tesseract.recognize(failedItem.file, 'eng');
+      const { createWorker } = await import('tesseract.js');
+      // Self-hosted engine + language data (public/tesseract/). The
+      // library's defaults download the worker and wasm core from jsdelivr
+      // and a ~10MB language file from tessdata.projectnaptha.com at scan
+      // time, so any CDN hiccup, slow cell connection, or iOS PWA
+      // network restriction failed the whole fallback with no useful
+      // message. Absolute URLs are required because the worker is started
+      // from a blob, where relative paths don't resolve.
+      const base = `${window.location.origin}/tesseract`;
+      const worker = await createWorker('eng', 1, {
+        workerPath: `${base}/worker.min.js`,
+        corePath: base,
+        langPath: base,
+        gzip: true
+      });
+      let data;
+      try {
+        ({ data } = await worker.recognize(failedItem.file));
+      } finally {
+        await worker.terminate().catch(() => {});
+      }
       const parsedStops = parseRawOcrText(data?.text);
       setReviewStops(parsedStops);
       setFallbackMode('review');
     } catch (err) {
       console.error('Client-side text scan failed:', err);
-      setError('Text scan also failed for that screenshot. You can enter its stops manually, or remove it from the batch and continue with the rest.');
+      const detail = err?.message ? ` (${String(err.message).slice(0, 120)})` : '';
+      setError(`Text scan also failed for that screenshot${detail}. You can enter its stops manually, or remove it from the batch and continue with the rest.`);
       setFallbackMode('idle');
     }
   };

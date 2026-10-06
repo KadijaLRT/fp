@@ -1324,3 +1324,16 @@ completed or skipped from the card view while the list view's edit box
 was left open on it — both views are reachable via the same view-mode
 toggle at any time, so this prevents an edit box from being left open on
 a stop that's no longer the active one.
+
+
+## Route optimization no longer uses any external routing API
+
+Mapbox and then OpenRouteService were removed from `/api/optimize`: both
+produced failures (keys, daily quotas, outages) that broke route building,
+and the free hosted alternatives (OSRM demo servers) forbid commercial use,
+cap requests at 1/second and have no uptime guarantee. Driving times
+between stops are now estimated locally (haversine distance x 1.35 road
+circuity factor / 9 m/s) and fed to the same nearest-neighbor + 2-opt
+solver. No key, no quota, no network dependency. Trade-off: times are
+estimates, not live-traffic road routing, so one-way streets and river
+crossings are not modeled. `ORS_API_KEY` can be deleted from Vercel.

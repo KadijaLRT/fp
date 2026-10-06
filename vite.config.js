@@ -24,12 +24,20 @@ export default defineConfig({
         ]
       },
       workbox: {
+        // The self-hosted text-scan engine (public/tesseract/) is ~10MB:
+        // keep it out of the install-time precache and cache it on first use.
+        globIgnores: ['tesseract/**'],
         // Never cache API calls — routes/OCR results must always be fresh
         navigateFallbackDenylist: [/^\/api\//],
         runtimeCaching: [
           {
             urlPattern: /^\/api\//,
             handler: 'NetworkOnly'
+          },
+          {
+            urlPattern: ({ url }) => url.pathname.startsWith('/tesseract/'),
+            handler: 'CacheFirst',
+            options: { cacheName: 'tesseract-assets', expiration: { maxEntries: 8 } }
           }
         ]
       }

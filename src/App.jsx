@@ -891,6 +891,7 @@ export default function App() {
 
     const originalOrder = routableRemaining.map((s) => s.id);
     let reordered = null;
+    let optimizeFailureReason = null;
 
     if (isOnline) {
       try {
@@ -907,9 +908,11 @@ export default function App() {
           reordered = result.optimizedStops;
         } else {
           console.error('Reoptimize failed server-side, using offline solver:', result.error);
+          optimizeFailureReason = result?.error || `server error ${response.status}`;
         }
       } catch (err) {
         console.error('Reoptimize request failed, using offline solver:', err);
+        optimizeFailureReason = err?.message || 'network error';
       }
     }
 
@@ -917,7 +920,7 @@ export default function App() {
       reordered = solveRouteOffline(routableRemaining);
       setProcessingError(
         isOnline
-          ? 'Could not reach the route optimizer — used an approximate offline route instead.'
+          ? `Route optimizer failed (${optimizeFailureReason || 'unknown reason'}). Used an approximate offline route instead.`
           : "You're offline — used an approximate route (straight-line distance, not real driving times)."
       );
     }
