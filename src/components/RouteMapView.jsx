@@ -135,17 +135,34 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
         const isCurrent = idx === currentIndex;
         const color = isCompleted ? '#10b981' : isCurrent ? '#f59e0b' : '#525252';
 
+        // Numbered pin: same number the list view shows (stop.stopNumber,
+        // falling back to route position), so a driver can match a map
+        // pin to a list row. textContent (never innerHTML) since the value
+        // originates from OCR output.
+        const label = String(Number.isFinite(stop.stopNumber) ? stop.stopNumber : idx + 1);
+        const size = isCurrent ? 32 : 26;
         const el = document.createElement('div');
-        el.style.width = isCurrent ? '20px' : '14px';
-        el.style.height = isCurrent ? '20px' : '14px';
+        el.textContent = label;
+        el.style.width = `${size}px`;
+        el.style.height = `${size}px`;
         el.style.borderRadius = '50%';
         el.style.background = color;
+        el.style.color = isCurrent || isCompleted ? '#0a0a0a' : '#f5f5f5';
+        el.style.display = 'flex';
+        el.style.alignItems = 'center';
+        el.style.justifyContent = 'center';
+        el.style.fontWeight = '700';
+        el.style.fontFamily = 'system-ui, sans-serif';
+        el.style.fontSize = label.length >= 3 ? '10px' : isCurrent ? '14px' : '12px';
+        el.style.lineHeight = '1';
         el.style.border = '2px solid #0a0a0a';
         el.style.boxShadow = isCurrent ? '0 0 0 4px rgba(245,158,11,0.3)' : 'none';
+        el.style.cursor = 'pointer';
+        el.style.zIndex = isCurrent ? '2' : '1';
 
         const marker = new maplibregl.Marker({ element: el })
           .setLngLat([stop.lng, stop.lat])
-          .setPopup(new maplibregl.Popup({ offset: 12 }).setText(`${stop.stopNumber}. ${stop.address}`))
+          .setPopup(new maplibregl.Popup({ offset: 18 }).setText(`${stop.stopNumber}. ${stop.address}`))
           .addTo(map);
         markersRef.current.push(marker);
       });
