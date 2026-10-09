@@ -63,7 +63,9 @@ function validateParsedItinerary(parsed) {
     if (!address) continue; // an address-less stop is useless downstream
 
     cleanedStops.push({
-      stopNumber: Number.isFinite(Number(raw.stopNumber)) ? Number(raw.stopNumber) : cleanedStops.length + 1,
+      // Keep Amazon's own pin number. null (not a made-up sequence number)
+      // when it wasn't read, so the client can tell real numbers from guesses.
+      stopNumber: Number.isInteger(Number(raw.stopNumber)) && Number(raw.stopNumber) > 0 ? Number(raw.stopNumber) : null,
       address,
       packageCount: Number.isFinite(Number(raw.packageCount)) && Number(raw.packageCount) > 0
         ? Math.floor(Number(raw.packageCount))
@@ -93,8 +95,15 @@ async function callGroqWithRetry(imageBase64) {
               content: [
                 {
                   type: 'text',
-                  text: `Extract the delivery itinerary details from this Amazon Flex screenshot.
-Return ONLY a JSON object strictly following this structure, with no markdown fences or commentary:
+                  text: `Extract the delivery stops from this Amazon Flex "Itinerary List" screenshot.
+Each stop is a row with this layout, top to bottom:
+  - a map-pin icon on the LEFT containing the stop number (e.g. 2, 17, 21)
+  - a line like "# SA12 • Scheduled 3:00 - 8:00 AM Today" (SA12 is a station/route code, NOT part of the address and NOT a stop number)
+  - the street address line, which may end with unit text like "3RD FLOOR" or "APT 4"
+  - the city line (e.g. "EAST HARTFORD")
+  - a line like "Deliver 1 package" or "Deliver 3 packages"
+A row labeled "Next Stop:" is a normal stop: extract it like the others.
+Return ONLY a JSON object, no markdown fences or commentary:
 {
   "stops": [
     {
@@ -106,7 +115,13 @@ Return ONLY a JSON object strictly following this structure, with no markdown fe
     }
   ]
 }
-If the image is blurry, cropped, or you cannot confidently read an address, omit that stop rather than guessing.`
+Rules:
+- stopNumber: the number inside the map pin, exactly as shown. Never renumber and never use the row's position on screen.
+- address: the street line EXACTLY as shown (keep floor/unit text), then a comma, then the city line. Example: "89 GARVAN ST 3RD FLOOR, EAST HARTFORD". Do not include the station code, the schedule text or the package text.
+- packageCount: the number from "Deliver N package(s)"; use 1 only if that line is not visible.
+- deliveryWindow: only the time range, e.g. "3:00 - 8:00 AM"; drop the words "Scheduled" and "Today". null if not shown.
+- notes: any extra instruction text shown for the stop, else null.
+- Include every fully visible row, in on-screen order. Skip a row that is cut off at the top or bottom edge so that its pin number or address cannot be read with certainty. Never guess.`
                 },
                 { type: 'image_url', image_url: { url: imageBase64 } }
               ]

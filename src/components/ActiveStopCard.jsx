@@ -30,6 +30,7 @@ const VEHICLE_ZONES = [
 export default function ActiveStopCard({
   currentStop,
   totalStops,
+  stopPosition,
   onCompleteStop,
   onSkipStop,
   onSetVehicleZone,
@@ -146,13 +147,22 @@ export default function ActiveStopCard({
   // text alone doesn't *feel* like forward motion the way a bar filling
   // up does, and that feeling was the actual complaint: not that the
   // number was wrong, but that nothing on screen conveyed progress.
-  const completedCount = Math.max(0, currentStop.stopNumber - 1);
+  // Position in the CURRENT drive order (passed from App), not Amazon's
+  // original stopNumber, which goes stale after optimizing or reordering.
+  const position = Number.isFinite(stopPosition) ? stopPosition : currentStop.stopNumber;
+  const amazonNumber = Number.isFinite(currentStop.stopNumber) ? currentStop.stopNumber : position;
+  const completedCount = Math.max(0, position - 1);
   const progressPct = totalStops > 0 ? Math.min(100, Math.round((completedCount / totalStops) * 100)) : 0;
 
   return (
     <div className="max-w-md mx-auto p-4">
       <div className="flex justify-between items-center mb-1.5 text-xs text-neutral-500 font-bold uppercase tracking-wider">
-        <span>Stop {currentStop.stopNumber} of {totalStops}</span>
+        <span>
+          Stop {amazonNumber}
+          <span className="ml-2 text-neutral-600 normal-case font-semibold tracking-normal">
+            {position} of {totalStops}
+          </span>
+        </span>
         <span className="bg-emerald-950 text-emerald-300 px-2 py-0.5 rounded-full normal-case font-semibold tracking-normal">
           🟢 On Schedule
         </span>

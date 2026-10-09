@@ -265,21 +265,50 @@ export default function ItineraryUpload({ onRouteImported }) {
     setError(null);
   };
 
-  // Merges every successfully-OCR'd screenshot's stops into one itinerary,
-  // in the order the files were selected — the closest available signal
-  // to the driver's actual stop order, since each image's OCR restarts
-  // its own stopNumber at 1 and has no idea it's part of a larger set.
-  // Renumbered sequentially here rather than trusting any individual
-  // image's stopNumber. This is a best-effort merge, not a guarantee: if
-  // two screenshots overlap (the same stops appear in both because the
-  // driver's scroll positions overlapped), those stops will appear twice
-  // in the merged list — worth a quick glance at the total count against
-  // what the Flex app shows before starting the route.
+  // Merges every successfully-OCR'd screenshot into one itinerary using
+  // Amazon's own stop numbers (the number in each row's map pin), so the
+  // app's numbering matches the Flex app exactly. Screenshots of a
+  // scrolling list usually overlap, so a stop seen twice (same number) is
+  // kept once, preferring the copy with the longer/more complete address.
+  // Result is sorted by Amazon's number. If any stop is missing its
+  // number (OCR couldn't read the pin), numbers can't be trusted, so it
+  // falls back to file order with sequential numbering.
   const handleContinue = () => {
     const successfulItems = batch.filter((item) => item.status === 'success');
-    const mergedStops = successfulItems
-      .flatMap((item) => item.stops)
-      .map((stop, idx) => ({ ...stop, stopNumber: idx + 1 }));
+    const allStops = successfulItems.flatMap((item) => item.stops);
+
+    // Stops typed or text-scanned in the review screen carry per-screenshot
+    // numbers (1, 2, 3...) that would collide with real Flex numbers, so
+    // they are treated as unnumbered and slot into the unused numbers
+    // (normally the gap left by the screenshot that failed).
+    const numbered = allStops.filter((s) => !s.fromReview && Number.isInteger(s.stopNumber) && s.stopNumber > 0);
+    const unnumbered = allStops.filter((s) => !numbered.includes(s));
+
+    let mergedStops;
+    if (numbered.length > 0) {
+      const byNumber = new Map();
+      for (const stop of numbered) {
+        const existing = byNumber.get(stop.stopNumber);
+        if (!existing || (stop.address || '').length > (existing.address || '').length) {
+          byNumber.set(stop.stopNumber, stop);
+        }
+      }
+      const used = new Set(byNumber.keys());
+      let candidate = Math.min(...used);
+      for (const stop of unnumbered) {
+        while (used.has(candidate)) candidate++;
+        const { fromReview, ...rest } = stop;
+        void fromReview;
+        byNumber.set(candidate, { ...rest, stopNumber: candidate });
+        used.add(candidate);
+      }
+      mergedStops = [...byNumber.values()].sort((x, y) => x.stopNumber - y.stopNumber);
+    } else {
+      mergedStops = allStops.map(({ fromReview, ...stop }, idx) => {
+        void fromReview;
+        return { ...stop, stopNumber: idx + 1 };
+      });
+    }
 
     if (mergedStops.length === 0) {
       setError('No stops to import yet — process at least one screenshot successfully first.');
@@ -365,14 +394,14 @@ export default function ItineraryUpload({ onRouteImported }) {
     lastFailedFileRef.current = null;
 
     if (failedItem?.id) {
-      updateBatchItem(failedItem.id, { status: 'success', stops: confirmedStops, error: null });
+      updateBatchItem(failedItem.id, { status: 'success', stops: confirmedStops.map((st) => ({ ...st, fromReview: true })), error: null });
     } else {
       // Manual entry with nothing to recover into (batch empty / no
       // specific failed item) — treat it as its own one-off item so it
       // still flows through the same "Continue" merge step.
       setBatch((prev) => [
         ...prev,
-        { id: nextBatchItemId++, file: null, status: 'success', stops: confirmedStops, error: null }
+        { id: nextBatchItemId++, file: null, status: 'success', stops: confirmedStops.map((st) => ({ ...st, fromReview: true })), error: null }
       ]);
     }
   };

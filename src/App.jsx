@@ -3,13 +3,14 @@ import ItineraryUpload from './components/ItineraryUpload';
 import HomeScreen from './components/HomeScreen';
 import ActiveStopCard from './components/ActiveStopCard';
 import StopListView from './components/StopListView';
+import BlockTimeBanner from './components/BlockTimeBanner';
+import RouteNoticeModal from './components/RouteNoticeModal';
+import { compareToAmazonOrder } from './utils/etaEstimate';
 import RouteMapView from './components/RouteMapView';
 import AuthScreen from './components/AuthScreen';
 import ApartmentIntelEditor from './components/ApartmentIntelEditor';
 import BlockPayPrompt from './components/BlockPayPrompt';
-import PayRateBanner from './components/PayRateBanner';
 import DeadlinePrompt from './components/DeadlinePrompt';
-import DeadlineBanner from './components/DeadlineBanner';
 import { geocodeAddress, geocodeAddressBatch } from './utils/geocoder';
 import { watchDriverPosition, distanceMeters } from './utils/geolocation';
 import { parseDeliveryWindowEnd } from './utils/deliveryWindow';
@@ -500,10 +501,26 @@ export default function App() {
 
           if (response.ok && result.success) {
             const unresolvedStops = geocodedStops.filter((s) => s.lat === null || s.lng === null);
-            finalRoute = [...result.optimizedStops, ...unresolvedStops];
+            let optimizedList = result.optimizedStops;
             estimatedDrivingSeconds = typeof result.estimatedDrivingSeconds === 'number' ? result.estimatedDrivingSeconds : null;
 
-            const newOrder = result.optimizedStops.map((s) => s.id);
+            // If the optimizer can't beat Amazon's own order by at least a
+            // minute of driving, Amazon's order IS the best route: keep it
+            // and tell the driver, instead of presenting a pointless
+            // reshuffle as an improvement.
+            const vsAmazon = compareToAmazonOrder(optimizedList);
+            if (vsAmazon && vsAmazon.savedSeconds < 60) {
+              optimizedList = [...optimizedList].sort((a, b) => a.stopNumber - b.stopNumber);
+              estimatedDrivingSeconds = vsAmazon.amazonDriveSeconds;
+              setRouteNotice({
+                title: "Amazon's route is already the best",
+                message:
+                  "We checked your stops and no reordering is faster than Amazon's order, so no optimization is needed. Your route follows Amazon's stop numbers."
+              });
+            }
+            finalRoute = [...optimizedList, ...unresolvedStops];
+
+            const newOrder = optimizedList.map((s) => s.id);
             const orderChanged = originalOrder.some((id, i) => id !== newOrder[i]);
             if (orderChanged) {
               fetchRouteExplanation(originalOrder, newOrder);
@@ -583,7 +600,8 @@ export default function App() {
         routeStartedAtMs: routeStartMs,
         routeEstDurationSeconds: estimatedDrivingSeconds
       });
-      setShowBlockPayPrompt(true);
+      // Ask for the block end time right after import (skippable).
+      setShowDeadlinePrompt(true);
     } catch (err) {
       console.error('Failed to process route:', err);
       setProcessingError(err.message || 'Failed to process this route. Please try again.');
@@ -764,6 +782,7 @@ export default function App() {
   // fix that silently kept the OLD coordinates would be worse than not
   // letting the driver edit at all, since the UI would show a corrected
   // address string while still navigating to the wrong place.
+  const [routeNotice, setRouteNotice] = useState(null);
   const [editingStopId, setEditingStopId] = useState(null);
   const [isGeocodingEdit, setIsGeocodingEdit] = useState(false);
 
@@ -940,6 +959,12 @@ export default function App() {
     if (orderChanged && isOnline) {
       fetchRouteExplanation(originalOrder, newOrder);
     }
+    if (!orderChanged && !optimizeFailureReason && isOnline) {
+      setRouteNotice({
+        title: 'Your route is already the best',
+        message: 'We rechecked the remaining stops and no other order is faster, so nothing was changed.'
+      });
+    }
 
     setIsReoptimizing(false);
   }, [stops, currentIndex, isOnline, isReoptimizing, currentRouteId, routeStartedAtMs, routeEstDurationSeconds]);
@@ -1108,6 +1133,16 @@ export default function App() {
               </p>
             )}
 
+            {stops.length > 0 && currentIndex < stops.length && (
+              <BlockTimeBanner
+                stops={stops}
+                currentIndex={currentIndex}
+                routeStartedAtMs={routeStartedAtMs}
+                blockEndTime={deadlineTime}
+                onSetBlockEnd={() => setShowDeadlinePrompt(true)}
+              />
+            )}
+
             <div className="max-w-md mx-auto px-4 mb-3">
               <div className="flex bg-neutral-900 border border-neutral-800 rounded-xl p-1 gap-1">
                 {[
@@ -1147,22 +1182,10 @@ export default function App() {
 
             {viewMode === 'card' && (
               <>
-                <PayRateBanner
-                  blockPayCents={blockPayCents}
-                  routeStartedAtMs={routeStartedAtMs}
-                  onSetBlockPay={() => setShowBlockPayPrompt(true)}
-                />
-                <DeadlineBanner
-                  routeStartedAtMs={routeStartedAtMs}
-                  routeEstDurationSeconds={routeEstDurationSeconds}
-                  completedStopCount={completedStops.length}
-                  totalStopCount={stops.length}
-                  deadlineTime={deadlineTime}
-                  onSetDeadline={() => setShowDeadlinePrompt(true)}
-                />
                 <ActiveStopCard
                   currentStop={currentStop}
                   totalStops={stops.length}
+                  stopPosition={currentIndex + 1}
                   onCompleteStop={handleCompleteStop}
                   onSkipStop={handleSkipStop}
                   routeExplanation={routeExplanation}
@@ -1221,6 +1244,10 @@ export default function App() {
           onSave={handleSaveBlockPay}
           onSkip={handleSkipBlockPay}
         />
+      )}
+
+      {routeNotice && (
+        <RouteNoticeModal title={routeNotice.title} message={routeNotice.message} onClose={() => setRouteNotice(null)} />
       )}
 
       {showDeadlinePrompt && (

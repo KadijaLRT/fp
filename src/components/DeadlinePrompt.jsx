@@ -1,16 +1,14 @@
 import React, { useState } from 'react';
 import { parseDeadlineToday } from '../utils/deadlineProjection';
-import { getStandingDeadline, setStandingDeadline } from '../lib/driverDeadline';
 
 /**
- * Lets a driver set a hard "need to be done by" time — e.g. before a
- * school drop-off. Optional, skippable, editable later. Pre-fills from
- * (and saves back to) a standing device preference, since this is
- * typically a recurring daily constraint, not something that changes
- * block to block.
+ * Asks for the driver's block end time (shown on their Flex block details).
+ * Not pre-filled from a saved value: block end times change from block to
+ * block, so a remembered one would usually be wrong. Skippable and
+ * editable later from the banner.
  */
 export default function DeadlinePrompt({ initialTime, onSave, onSkip }) {
-  const [value, setValue] = useState(initialTime || getStandingDeadline() || '');
+  const [value, setValue] = useState(initialTime || '');
   const [error, setError] = useState(null);
 
   const handleSave = () => {
@@ -22,16 +20,15 @@ export default function DeadlinePrompt({ initialTime, onSave, onSkip }) {
       setError('Enter a valid time.');
       return;
     }
-    setStandingDeadline(value);
     onSave(value);
   };
 
   return (
     <div className="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
       <div className="bg-neutral-900 w-full sm:max-w-sm sm:rounded-2xl rounded-t-2xl px-5 pt-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))]">
-        <h2 className="text-lg font-bold text-neutral-50 mb-1">Need to be done by a certain time?</h2>
+        <h2 className="text-lg font-bold text-neutral-50 mb-1">When does your block end?</h2>
         <p className="text-xs text-neutral-500 mb-4">
-          Optional — the app will warn you if your pace won't get you done in time.
+          Find it in your block details in Flex. The app will show how much time you have left and how many minutes each remaining stop gets.
         </p>
 
         <input

@@ -64,6 +64,27 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
         map.on('load', () => {
           if (cancelled) return;
 
+          // The dark basemap's street/place names are dim gray on near-black,
+          // unreadable at a glance in a moving car. Force every text layer to
+          // bright text with a heavy dark halo, and bump the size a little.
+          try {
+            (map.getStyle().layers || []).forEach((layer) => {
+              if (layer.type !== 'symbol' || !layer.layout || !layer.layout['text-field']) return;
+              map.setPaintProperty(layer.id, 'text-color', '#f5f5f5');
+              map.setPaintProperty(layer.id, 'text-halo-color', '#000000');
+              map.setPaintProperty(layer.id, 'text-halo-width', 2);
+              map.setPaintProperty(layer.id, 'text-halo-blur', 0.5);
+              const size = layer.layout['text-size'];
+              map.setLayoutProperty(
+                layer.id,
+                'text-size',
+                typeof size === 'number' ? size + 2 : ['+', 2, size ?? 12]
+              );
+            });
+          } catch (labelErr) {
+            console.warn('Could not restyle map labels:', labelErr);
+          }
+
           map.addSource('route-line', {
             type: 'geojson',
             data: {
@@ -135,8 +156,7 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
         const isCurrent = idx === currentIndex;
         const color = isCompleted ? '#10b981' : isCurrent ? '#f59e0b' : '#525252';
 
-        // Numbered pin: same number the list view shows (stop.stopNumber,
-        // falling back to route position), so a driver can match a map
+        // Numbered pin: same Amazon stop number the list and card show, so a driver can match a map
         // pin to a list row. textContent (never innerHTML) since the value
         // originates from OCR output.
         const label = String(Number.isFinite(stop.stopNumber) ? stop.stopNumber : idx + 1);
@@ -162,7 +182,7 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
 
         const marker = new maplibregl.Marker({ element: el })
           .setLngLat([stop.lng, stop.lat])
-          .setPopup(new maplibregl.Popup({ offset: 18 }).setText(`${stop.stopNumber}. ${stop.address}`))
+          .setPopup(new maplibregl.Popup({ offset: 18 }).setText(`${Number.isFinite(stop.stopNumber) ? stop.stopNumber : idx + 1}. ${stop.address}`))
           .addTo(map);
         markersRef.current.push(marker);
       });

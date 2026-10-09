@@ -54,7 +54,31 @@ const DEFAULT_REGION_HINT = 'Hartford, CT';
 // Deliberately permissive (a false positive just means a hint doesn't get
 // appended to an address that didn't need one, which is harmless) rather
 // than trying to exhaustively validate real US geography here.
-const HAS_STATE_PATTERN = /\b[A-Z]{2}\b\s*\d{0,5}\s*$/;
+// Real US state/DC abbreviations only. A generic "any two capitals" test
+// treated the street suffix "ST" in all-caps Flex addresses ("232 MAIN ST")
+// as a state, so the region hint was never added to exactly the bare
+// addresses that needed it.
+const US_STATES = new Set(
+  'AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY'.split(' ')
+);
+function hasStateAtEnd(address) {
+  const m = address.match(/\b([A-Za-z]{2})\b\s*(?:\d{5}(?:-\d{4})?)?\s*$/);
+  return !!m && US_STATES.has(m[1].toUpperCase()) && (m[1] === m[1].toUpperCase() || /,\s*[A-Za-z]{2}\s*(?:\d{5})?\s*$/.test(address));
+}
+
+// Floor/unit text ("3RD FLOOR", "APT 4", "#2B") confuses geocoders and
+// never changes the building's location, so it is removed from the lookup
+// only; the driver still sees the full address as printed.
+function stripUnitInfo(address) {
+  return address
+    .replace(/\b\d+(?:st|nd|rd|th)\s+(?:floor|fl)\b/gi, '')
+    .replace(/\b(?:floor|fl)\s*\d+\b/gi, '')
+    .replace(/\b(?:apt|apartment|unit|ste|suite|rm|room)\.?\s*#?\s*[\w-]+/gi, '')
+    .replace(/#\s*[\w-]+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+,/g, ',')
+    .replace(/^[,\s]+|[,\s]+$/g, '');
+}
 
 // Separately: does the address already name SOME city, even without a
 // state? ("78 Oak Ave, Windsor"). This matters because blindly appending
@@ -83,7 +107,7 @@ function getRegionHint() {
 }
 
 function addRegionHintIfMissing(address) {
-  if (HAS_STATE_PATTERN.test(address)) {
+  if (hasStateAtEnd(address)) {
     return address;
   }
   const hint = getRegionHint();
@@ -166,7 +190,7 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
     return { ...cached, error: null };
   }
 
-  const queryAddress = addRegionHintIfMissing(trimmedAddress);
+  const queryAddress = addRegionHintIfMissing(stripUnitInfo(trimmedAddress) || trimmedAddress);
   const params = new URLSearchParams({ address: queryAddress, bounds: getGeocodingBboxString() });
   const url = `/api/geocode?${params.toString()}`;
 

@@ -1337,3 +1337,16 @@ circuity factor / 9 m/s) and fed to the same nearest-neighbor + 2-opt
 solver. No key, no quota, no network dependency. Trade-off: times are
 estimates, not live-traffic road routing, so one-way streets and river
 crossings are not modeled. `ORS_API_KEY` can be deleted from Vercel.
+
+## Amazon stop numbers, tuned to the real Flex itinerary layout
+
+- Stop numbers everywhere (card, list, map) are Amazon's own pin numbers.
+  Screenshots are merged by those numbers; overlapping screenshots are
+  de-duplicated; stops from the review screen fill unused numbers.
+- The OCR prompt and the on-device fallback parser match the real layout:
+  pin number, `# SA12 • Scheduled 3:00 - 8:00 AM Today` (station code, not
+  an address), street line (+ floor/unit), city line, `Deliver N package(s)`.
+- The geocoder strips floor/unit text for lookup only, and the state check
+  uses real state abbreviations (all-caps "ST" is no longer mistaken for one).
+- Map labels are forced to bright text with a dark halo for readability.
+- The pace/$-per-hour counter and its post-import prompt were removed.

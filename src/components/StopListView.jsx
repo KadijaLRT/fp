@@ -105,7 +105,7 @@ export default function StopListView({
                           : 'bg-neutral-800 text-neutral-500'
                     }`}
                   >
-                    {isCompleted ? '✓' : stop.stopNumber}
+                    {isCompleted ? '✓' : stop.stopNumber ?? idx + 1}
                   </span>
                   <div className="min-w-0 flex-1">
                     {isEditing ? (

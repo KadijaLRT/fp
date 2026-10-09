@@ -30,7 +30,9 @@ const ADDRESS_LINE_PATTERN = /\d{1,6}\s+[A-Za-z0-9.,'#/\s-]{4,120}(?:\b[A-Z]{2}\
 
 const PACKAGE_COUNT_PATTERN = /(\d+)\s*(?:pkg|pkgs|package|packages|item|items)\b/i;
 
-const TIME_WINDOW_PATTERN = /(\d{1,2}:\d{2}\s*[AP]M\s*[-–to]+\s*\d{1,2}:\d{2}\s*[AP]M|\bby\s+\d{1,2}:\d{2}\s*[AP]M)/i;
+// Flex prints ranges like "3:00 - 8:00 AM" with the meridiem only on the
+// END time, as well as "10:00 AM - 12:00 PM" and "by 5:00 PM".
+const TIME_WINDOW_PATTERN = /(\d{1,2}:\d{2}\s*(?:[AP]M)?\s*[-–]\s*\d{1,2}:\d{2}\s*[AP]M|\bby\s+\d{1,2}:\d{2}\s*[AP]M)/i;
 
 // Real Flex screenshots frequently pack the address, package count, and
 // delivery window onto ONE line (e.g. "45 Elm Street Apt 3 • 1 package •
@@ -85,6 +87,11 @@ export function parseRawOcrText(rawText) {
     .filter(({ line }) => {
       if (!ADDRESS_LINE_PATTERN.test(line)) return false;
 
+      // Flex rows also contain "# SA12 • Scheduled 3:00 - 8:00 AM Today" and
+      // "Deliver 1 package" lines; both contain digits followed by words, so
+      // they must be excluded explicitly or they masquerade as addresses.
+      if (/scheduled|^#|^deliver\b|next stop/i.test(line)) return false;
+
       // Reject lines that are basically just "N packages" or "N item(s)" —
       // these match the address pattern (a leading number) but aren't
       // addresses. A real street address has more going on than two words.
@@ -123,8 +130,30 @@ export function parseRawOcrText(rawText) {
     // "45 Elm Street Apt 3 • 1 package • by 5:00 PM" from having the
     // package count and time text end up inside the extracted address:
     // the address pattern never sees them because they're already gone.
+    // Real Flex rows put the "Scheduled 3:00 - 8:00 AM Today" line ABOVE
+    // the address, and the city line plus "Deliver N package(s)" BELOW it,
+    // so the window is also searched in the two lines before the address.
     const packageMatch = blockText.match(PACKAGE_COUNT_PATTERN);
-    const windowMatch = blockText.match(TIME_WINDOW_PATTERN);
+    const precedingText = lines.slice(Math.max(0, startIdx - 2), startIdx).join(' ');
+    const windowMatch = blockText.match(TIME_WINDOW_PATTERN) || precedingText.match(TIME_WINDOW_PATTERN);
+
+    // City line directly under the street line (letters only, e.g.
+    // "EAST HARTFORD"); appended so the geocoder gets a real locality.
+    const nextLine = lines[startIdx + 1] || '';
+    const cityLine =
+      /^[A-Za-z][A-Za-z .'-]{2,39}$/.test(nextLine) && !/deliver|package|scheduled|today|next stop/i.test(nextLine)
+        ? nextLine
+        : null;
+
+    // Amazon's stop number is printed in the map pin, which OCR usually
+    // reads as a short standalone number line just above the schedule line.
+    let amazonNumber = null;
+    for (let k = startIdx - 1; k >= Math.max(0, startIdx - 3); k--) {
+      if (/^\d{1,3}$/.test(lines[k])) {
+        amazonNumber = parseInt(lines[k], 10);
+        break;
+      }
+    }
 
     const addressLineWithoutMetadata = stripKnownMetadata(line)
       // Metadata is often separated from the address by a bullet, pipe,
@@ -144,9 +173,11 @@ export function parseRawOcrText(rawText) {
 
     const addressMatch = addressLineWithoutMetadata.match(ADDRESS_LINE_PATTERN);
 
+    const streetPart = addressMatch ? addressMatch[0].trim() : addressLineWithoutMetadata;
+
     return {
-      stopNumber: idx + 1,
-      address: addressMatch ? addressMatch[0].trim() : addressLineWithoutMetadata,
+      stopNumber: amazonNumber ?? idx + 1,
+      address: cityLine ? `${streetPart}, ${cityLine}` : streetPart,
       packageCount: packageMatch ? Math.max(1, parseInt(packageMatch[1], 10)) : 1,
       deliveryWindow: windowMatch ? windowMatch[0].trim() : null,
       notes: null,
