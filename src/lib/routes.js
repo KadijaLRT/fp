@@ -138,7 +138,12 @@ export async function finalizeRouteStop(routeStopId, { status, totalStopSeconds 
   try {
     const payload = { status };
     if (status === 'completed') {
-      payload.total_stop_seconds = Math.max(0, Math.round(totalStopSeconds || 0));
+      // Only record a real measured duration. A missing/zero value (stop
+      // marked delivered from the list view, no timer) stays NULL so the
+      // auto-learning trigger skips it instead of averaging in a fake 0s.
+      if (Number.isFinite(totalStopSeconds) && totalStopSeconds > 0) {
+        payload.total_stop_seconds = Math.round(totalStopSeconds);
+      }
       payload.delivery_time = new Date().toISOString();
     }
 

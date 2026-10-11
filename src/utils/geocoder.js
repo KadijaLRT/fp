@@ -75,6 +75,8 @@ function stripUnitInfo(address) {
     .replace(/\b(?:floor|fl)\s*\d+\b/gi, '')
     .replace(/\b(?:apt|apartment|unit|ste|suite|rm|room)\.?\s*#?\s*[\w-]+/gi, '')
     .replace(/#\s*[\w-]+/g, '')
+    // Abbreviations geocoders don't recognise (seen on real Flex screens).
+    .replace(/\bxing\b/gi, 'Crossing')
     .replace(/\s{2,}/g, ' ')
     .replace(/\s+,/g, ',')
     .replace(/^[,\s]+|[,\s]+$/g, '');

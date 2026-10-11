@@ -429,6 +429,23 @@ export default function ItineraryUpload({ onRouteImported }) {
     .filter((i) => i.status === 'success')
     .reduce((sum, i) => sum + (i.stops?.length || 0), 0);
 
+  // Amazon numbers missing between the lowest and highest scanned stop
+  // (e.g. 3 and 4 when 2 and 5 were read) usually mean a screenshot is missing.
+  const seenNumbers = new Set(
+    batch
+      .filter((i) => i.status === 'success')
+      .flatMap((i) => i.stops || [])
+      .map((st) => st.stopNumber)
+      .filter((n) => Number.isInteger(n) && n > 0)
+  );
+  const missingNumbers = [];
+  if (seenNumbers.size > 1) {
+    const nums = [...seenNumbers];
+    const lo = Math.min(...nums);
+    const hi = Math.max(...nums);
+    for (let n = lo; n <= hi && missingNumbers.length < 20; n++) if (!seenNumbers.has(n)) missingNumbers.push(n);
+  }
+
   return (
     <div className="p-4 max-w-md mx-auto text-center">
       <div className="border-2 border-dashed border-neutral-800 rounded-2xl p-6 bg-neutral-900 flex flex-col items-center justify-center">
@@ -537,6 +554,11 @@ export default function ItineraryUpload({ onRouteImported }) {
                   >
                     Retry {errorCount} failed screenshot{errorCount === 1 ? '' : 's'}
                   </button>
+                )}
+                {successCount > 0 && missingNumbers.length > 0 && (
+                  <p className="text-xs text-amber-300 bg-amber-950 border border-amber-800 rounded-lg p-2.5">
+                    ⚠️ No stop {missingNumbers.join(', ')} found. A screenshot may be missing, or you can continue and add them in review.
+                  </p>
                 )}
                 {successCount > 0 && (
                   <button

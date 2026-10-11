@@ -1,3 +1,5 @@
+import { normalizeDeliveryWindow } from './deliveryWindow.js';
+
 /**
  * When Groq's vision OCR fails, the fallback is client-side Tesseract.js —
  * but Tesseract returns raw unstructured text, not the clean JSON schema
@@ -70,7 +72,9 @@ export function parseRawOcrText(rawText) {
   const lines = rawText
     .split('\n')
     .map((l) => l.trim())
-    .filter(Boolean);
+    .filter(Boolean)
+    // Flex sometimes prints the street line twice in a row; keep one.
+    .filter((l, i, arr) => i === 0 || l.toLowerCase() !== arr[i - 1].toLowerCase());
 
   // Bug fix: this used to filter `lines` into `candidateLines` (losing
   // each line's original position), then re-find each one's index via
@@ -120,7 +124,12 @@ export function parseRawOcrText(rawText) {
   return candidateEntries.map(({ line, index: startIdx }, idx) => {
     const endIdx =
       idx + 1 < candidateEntries.length ? candidateEntries[idx + 1].index : Math.min(lines.length, startIdx + 5);
-    const blockLines = lines.slice(startIdx, endIdx);
+    let blockLines = lines.slice(startIdx, endIdx);
+    // The block must stop where the NEXT stop's header begins (its pin
+    // number line or its "# code • window" line), or this stop would
+    // inherit the next stop's delivery window.
+    const cut = blockLines.findIndex((l, i) => i > 0 && (/^\d{1,3}$/.test(l) || /^#/.test(l)));
+    if (cut > 0) blockLines = blockLines.slice(0, cut);
     const blockText = blockLines.join(' ');
 
     // Extract package count and delivery window from the whole block
@@ -135,7 +144,7 @@ export function parseRawOcrText(rawText) {
     // so the window is also searched in the two lines before the address.
     const packageMatch = blockText.match(PACKAGE_COUNT_PATTERN);
     const precedingText = lines.slice(Math.max(0, startIdx - 2), startIdx).join(' ');
-    const windowMatch = blockText.match(TIME_WINDOW_PATTERN) || precedingText.match(TIME_WINDOW_PATTERN);
+    const windowMatch = precedingText.match(TIME_WINDOW_PATTERN) || blockText.match(TIME_WINDOW_PATTERN);
 
     // City line directly under the street line (letters only, e.g.
     // "EAST HARTFORD"); appended so the geocoder gets a real locality.
@@ -173,14 +182,18 @@ export function parseRawOcrText(rawText) {
 
     const addressMatch = addressLineWithoutMetadata.match(ADDRESS_LINE_PATTERN);
 
+    // Small gray tag line under the package count (e.g. "Locker").
+    const afterPackage = blockLines.find((l) => /^(locker|business|signature|leave at door|hand to customer)\b/i.test(l));
+    const tagLine = afterPackage || null;
+
     const streetPart = addressMatch ? addressMatch[0].trim() : addressLineWithoutMetadata;
 
     return {
       stopNumber: amazonNumber ?? idx + 1,
       address: cityLine ? `${streetPart}, ${cityLine}` : streetPart,
       packageCount: packageMatch ? Math.max(1, parseInt(packageMatch[1], 10)) : 1,
-      deliveryWindow: windowMatch ? windowMatch[0].trim() : null,
-      notes: null,
+      deliveryWindow: windowMatch ? normalizeDeliveryWindow(windowMatch[0]) : null,
+      notes: tagLine,
       // Flags this as a low-confidence, heuristically-extracted stop so
       // the UI can visually distinguish it from a normal Groq OCR result.
       needsManualReview: true

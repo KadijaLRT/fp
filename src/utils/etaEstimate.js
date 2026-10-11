@@ -14,7 +14,7 @@ const UNKNOWN_LEG_SECONDS = 120;
 // Completed stops needed before the driver's own average replaces defaults.
 const MIN_STOPS_FOR_CALIBRATION = 2;
 
-function legSeconds(a, b) {
+export function legSeconds(a, b) {
   if (!a || !b) return UNKNOWN_LEG_SECONDS;
   const meters = distanceMeters(a.lat, a.lng, b.lat, b.lng);
   if (meters === null) return UNKNOWN_LEG_SECONDS;

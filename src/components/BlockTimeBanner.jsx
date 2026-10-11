@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { parseDeadlineToday } from '../utils/deadlineProjection';
 import { compareToAmazonOrder, formatDuration } from '../utils/etaEstimate';
+import { getCalibration, estimateSavings, formatRangeMinutes } from '../utils/driveCalibration';
 
 function formatClock(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
@@ -17,8 +18,7 @@ function formatPerStop(seconds) {
  * Shows the driver's block end time (entered by them, not predicted), how
  * much of the block is left, how many stops remain and the average time
  * available per remaining stop. All plain arithmetic on a time the driver
- * supplied; no forecast of when the route will finish. Also shows the
- * estimated driving saved vs Amazon's order. Re-evaluated every 15s from
+ * supplied; no forecast of when the route will finish. Re-evaluated every 15s from
  * absolute timestamps so it stays correct after the phone sleeps.
  */
 export default function BlockTimeBanner({ stops, currentIndex, routeStartedAtMs, blockEndTime, onSetBlockEnd }) {
@@ -29,19 +29,26 @@ export default function BlockTimeBanner({ stops, currentIndex, routeStartedAtMs,
     return () => clearInterval(interval);
   }, []);
 
-  const vsAmazon = compareToAmazonOrder(stops);
-  const savedLine =
-    vsAmazon && Math.abs(vsAmazon.savedSeconds) >= 60 ? (
-      <p
-        className={`text-xs font-semibold mt-2 pt-2 border-t border-neutral-800 ${
-          vsAmazon.savedSeconds > 0 ? 'text-emerald-400' : 'text-amber-400'
-        }`}
-      >
-        {vsAmazon.savedSeconds > 0
-          ? `⚡ Saves ~${formatDuration(vsAmazon.savedSeconds)} of driving vs Amazon's order`
-          : `~${formatDuration(-vsAmazon.savedSeconds)} more driving than Amazon's order`}
+  const savings = useMemo(() => {
+    const vs = compareToAmazonOrder(stops);
+    if (!vs || vs.savedSeconds <= 0) return null;
+    const est = estimateSavings(vs.savedSeconds, getCalibration());
+    const label = formatRangeMinutes(est.lowSeconds, est.highSeconds);
+    return label ? { label, calibrated: est.calibrated, legsUsed: est.legsUsed } : null;
+  }, [stops]);
+
+  const savedLine = savings ? (
+    <div className="mt-2 pt-2 border-t border-neutral-800">
+      <p className="text-xs font-semibold text-emerald-400">
+        ⚡ Likely saves about {savings.label} of driving vs Amazon's order
       </p>
-    ) : null;
+      <p className="text-[10px] text-neutral-600 mt-0.5">
+        {savings.calibrated
+          ? `Estimate tuned to your pace (${savings.legsUsed} stops learned)`
+          : 'Rough estimate; gets sharper as you complete routes'}
+      </p>
+    </div>
+  ) : null;
 
   if (!blockEndTime) {
     return (

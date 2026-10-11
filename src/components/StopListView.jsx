@@ -13,13 +13,12 @@ import React, { useState, useEffect, useRef } from 'react';
  * choosing to skip/reoptimize. This is a manifest to review, not a
  * navigation control.
  *
- * Address editing and manual reordering (via up/down, not drag handles —
- * see the note on handleReorderStop below for why) are both scoped to
- * NOT-YET-COMPLETED stops only. A completed stop's address and position
- * are historical record of what actually happened on this route, not an
- * editable plan — editing or moving one here would silently rewrite
- * history that completedStops (tracked separately in App.jsx) doesn't
- * know to reconcile with.
+ * Address editing, manual reordering and "mark delivered" apply to every
+ * stop that isn't already completed, including the current one. A
+ * completed stop's address and position are historical record of what
+ * actually happened on this route, so they are locked. Marking a stop
+ * delivered from here records no timer duration (nothing was timing it),
+ * so it never feeds the learned stop-time averages.
  */
 export default function StopListView({
   stops,
@@ -29,10 +28,14 @@ export default function StopListView({
   onStartEdit,
   onCancelEdit,
   onSaveEdit,
-  onReorder
+  onReorder,
+  onMarkDelivered
 }) {
   const [expandedId, setExpandedId] = useState(null);
   const [draftAddress, setDraftAddress] = useState('');
+  // Which row is showing the "Mark delivered?" confirmation (two taps, so a
+  // stray touch while scrolling can't complete a stop).
+  const [confirmDeliveredId, setConfirmDeliveredId] = useState(null);
   const inputRef = useRef(null);
 
   // Seed the draft text whenever a different stop starts being edited —
@@ -55,25 +58,17 @@ export default function StopListView({
         {stops.map((stop, idx) => {
           const isCompleted = idx < currentIndex;
           const isCurrent = idx === currentIndex;
-          const isUpcoming = idx > currentIndex;
           const isExpanded = expandedId === stop.id;
           const isEditing = editingStopId === stop.id;
-          // Editing is allowed on the current stop too (a driver mid-route
-          // can fix a typo on the stop they're about to arrive at) — only
-          // completed stops are locked from editing. Reordering is
-          // further restricted to strictly-upcoming stops only (see
-          // isUpcoming/canMoveUp/canMoveDown below and the matching note
-          // in App.jsx's handleReorderStop): the current stop can't be
-          // moved by a list reorder, only through the app's explicit
-          // skip/complete flow.
+          // Every not-yet-completed stop (the current one included) can be
+          // edited, moved and marked delivered. Only completed stops are locked.
           const isEditable = !isCompleted;
-          // Moving "up" past the first upcoming stop (idx === currentIndex
-          // + 1) would land on currentIndex itself — blocked in
-          // App.jsx's handleReorderStop for the reasons noted there, so
-          // disabled here too rather than leaving a button that's
-          // clickable but silently does nothing.
-          const canMoveUp = isUpcoming && idx > currentIndex + 1;
-          const canMoveDown = isUpcoming && idx < stops.length - 1;
+          // The current stop is the first movable row, so it can't go "up"
+          // (that would put it among completed stops); the last row can't
+          // go "down". Disabled rather than clickable-but-inert.
+          const canMoveUp = isEditable && idx > currentIndex;
+          const canMoveDown = isEditable && idx < stops.length - 1;
+          const isConfirmingDelivered = confirmDeliveredId === stop.id;
 
           return (
             <div
@@ -124,6 +119,7 @@ export default function StopListView({
                         {stop.packageCount || 1} pkg{(stop.packageCount || 1) === 1 ? '' : 's'}
                         {stop.deliveryWindow ? ` · ${stop.deliveryWindow}` : ''}
                         {stop.needsReview ? ' · ⚠️ low-confidence address' : ''}
+                        {stop.notes && stop.notes.length <= 20 ? ` · ${stop.notes}` : ''}
                       </p>
                     )}
                   </div>
@@ -134,7 +130,15 @@ export default function StopListView({
               </button>
               {isEditable && !isEditing && (
                 <div className="flex-shrink-0 flex items-center">
-                  {isUpcoming && (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeliveredId(isConfirmingDelivered ? null : stop.id)}
+                    className="w-11 h-11 text-lg text-emerald-400"
+                    aria-label="Mark delivered"
+                  >
+                    ✓
+                  </button>
+                  {isEditable && (
                     <div className="flex flex-col">
                       <button
                         type="button"
@@ -167,6 +171,29 @@ export default function StopListView({
                 </div>
               )}
               </div>
+
+              {isConfirmingDelivered && !isEditing && (
+                <div className="mt-2 pt-2 border-t border-neutral-800 flex items-center gap-2">
+                  <span className="flex-1 text-xs text-neutral-300">Mark this stop delivered?</span>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmDeliveredId(null)}
+                    className="h-10 px-3 rounded-lg bg-neutral-800 text-neutral-300 text-xs font-semibold"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setConfirmDeliveredId(null);
+                      onMarkDelivered?.(stop.id);
+                    }}
+                    className="h-10 px-3 rounded-lg bg-emerald-500 text-neutral-950 text-xs font-bold"
+                  >
+                    ✓ Delivered
+                  </button>
+                </div>
+              )}
 
               {isEditing ? (
                 <div className="mt-2 pt-2 border-t border-neutral-800 space-y-2" onClick={(e) => e.stopPropagation()}>

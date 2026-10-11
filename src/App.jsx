@@ -5,7 +5,9 @@ import ActiveStopCard from './components/ActiveStopCard';
 import StopListView from './components/StopListView';
 import BlockTimeBanner from './components/BlockTimeBanner';
 import RouteNoticeModal from './components/RouteNoticeModal';
-import { compareToAmazonOrder } from './utils/etaEstimate';
+import { compareToAmazonOrder, formatDuration } from './utils/etaEstimate';
+import { parseDeadlineToday } from './utils/deadlineProjection';
+import { logCompletion, commitRouteLegs, getCalibration, estimateSavings, formatRangeMinutes } from './utils/driveCalibration';
 import RouteMapView from './components/RouteMapView';
 import AuthScreen from './components/AuthScreen';
 import ApartmentIntelEditor from './components/ApartmentIntelEditor';
@@ -447,12 +449,12 @@ export default function App() {
         }
       }
 
-      const unresolvedCount = geocodedStops.filter((s) => s.lat === null || s.lng === null).length;
+      const unresolvedCount = geocodedStops.filter((s) => !Number.isFinite(s.lat) || !Number.isFinite(s.lng)).length;
 
       // Only send stops with real coordinates into the matrix solver —
       // the server will 422 on nulls, and we already validate this
       // server-side, but filtering here avoids a wasted round trip.
-      const routableStops = geocodedStops.filter((s) => s.lat !== null && s.lng !== null);
+      const routableStops = geocodedStops.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng));
 
       // Bug fix: this used to require 2+ routable stops just to proceed at
       // all, conflating two very different situations. A single valid
@@ -500,7 +502,7 @@ export default function App() {
           const result = await response.json();
 
           if (response.ok && result.success) {
-            const unresolvedStops = geocodedStops.filter((s) => s.lat === null || s.lng === null);
+            const unresolvedStops = geocodedStops.filter((s) => !Number.isFinite(s.lat) || !Number.isFinite(s.lng));
             let optimizedList = result.optimizedStops;
             estimatedDrivingSeconds = typeof result.estimatedDrivingSeconds === 'number' ? result.estimatedDrivingSeconds : null;
 
@@ -513,9 +515,9 @@ export default function App() {
               optimizedList = [...optimizedList].sort((a, b) => a.stopNumber - b.stopNumber);
               estimatedDrivingSeconds = vsAmazon.amazonDriveSeconds;
               setRouteNotice({
-                title: "Amazon's route is already the best",
+                title: "Amazon's route is already about the best",
                 message:
-                  "We checked your stops and no reordering is faster than Amazon's order, so no optimization is needed. Your route follows Amazon's stop numbers."
+                  "We couldn't find a reordering that clearly beats Amazon's order, so we kept it. Your route follows Amazon's stop numbers."
               });
             }
             finalRoute = [...optimizedList, ...unresolvedStops];
@@ -527,12 +529,12 @@ export default function App() {
             }
           } else {
             console.error('Optimization failed, falling back to offline solver:', result.error);
-            finalRoute = [...solveRouteOffline(routableStops), ...geocodedStops.filter((s) => s.lat === null || s.lng === null)];
+            finalRoute = [...solveRouteOffline(routableStops), ...geocodedStops.filter((s) => !Number.isFinite(s.lat) || !Number.isFinite(s.lng))];
             setProcessingError(`Route optimization failed (${result.error || 'unknown error'}). Used an approximate offline route instead — reconnect and reoptimize when possible.`);
           }
         } catch (optErr) {
           console.error('Optimize request failed, falling back to offline solver:', optErr);
-          finalRoute = [...solveRouteOffline(routableStops), ...geocodedStops.filter((s) => s.lat === null || s.lng === null)];
+          finalRoute = [...solveRouteOffline(routableStops), ...geocodedStops.filter((s) => !Number.isFinite(s.lat) || !Number.isFinite(s.lng))];
           setProcessingError('Could not reach the route optimizer. Used an approximate offline route (straight-line distance, not real driving times) instead.');
         }
       }
@@ -664,6 +666,38 @@ export default function App() {
 
   const handleCompleteStop = useCallback(
     (stopMetrics) => {
+      // A stop marked delivered from the list view may be one that is
+      // still upcoming. Completed means "before currentIndex", so move it
+      // into the current slot first; the existing index advance below then
+      // puts it on the completed side and the old current stop stays next.
+      const targetIdx = stops.findIndex((s) => s.id === stopMetrics.stopId);
+      if (targetIdx > currentIndex) {
+        setStops((prev) => {
+          const i = prev.findIndex((s) => s.id === stopMetrics.stopId);
+          if (i <= currentIndex) return prev;
+          const next = [...prev];
+          const [moved] = next.splice(i, 1);
+          next.splice(currentIndex, 0, moved);
+          return next;
+        });
+      } else if (targetIdx !== -1 && targetIdx < currentIndex) {
+        return; // already completed; ignore a duplicate tap
+      }
+
+      // Log the tap time and place so real leg times can teach the
+      // time-saved estimate (see utils/driveCalibration.js). List-view
+      // taps carry no timer, so they're flagged and excluded from learning.
+      const loggedStop = stops.find((s) => s.id === stopMetrics.stopId);
+      if (routeStartedAtMs && loggedStop) {
+        logCompletion(routeStartedAtMs, {
+          stopId: loggedStop.id,
+          atMs: Date.now(),
+          lat: loggedStop.lat,
+          lng: loggedStop.lng,
+          fromList: !Number.isFinite(stopMetrics.durationSeconds)
+        });
+      }
+
       setCompletedStops((prev) => [...prev, stopMetrics]);
       setRouteExplanation(null);
       // Defensive: if the driver had the list view's edit box open on the
@@ -680,7 +714,9 @@ export default function App() {
       if (completedStop?.routeStopId) {
         persistStopCompletion(completedStop.routeStopId, {
           status: 'completed',
-          totalStopSeconds: stopMetrics.durationSeconds
+          // null when marked from the list view (no timer ran), so the
+          // learning trigger skips it instead of recording a fake 0s stop.
+          totalStopSeconds: Number.isFinite(stopMetrics.durationSeconds) ? stopMetrics.durationSeconds : null
         });
       }
 
@@ -688,12 +724,41 @@ export default function App() {
         setCurrentIndex((prev) => prev + 1);
       } else {
         let completionMessage = '🎉 Route Complete! Awesome job.';
-        if (currentRouteId && routeStartedAtMs) {
+        if (routeStartedAtMs) {
           const actualDurationSeconds = (Date.now() - routeStartedAtMs) / 1000;
-          persistRouteCompletion(currentRouteId, {
-            estDurationSeconds: routeEstDurationSeconds,
-            actualDurationSeconds
-          });
+          if (currentRouteId) {
+            persistRouteCompletion(currentRouteId, {
+              estDurationSeconds: routeEstDurationSeconds,
+              actualDurationSeconds
+            });
+          }
+          // Measured, not modeled: how long the route actually took and,
+          // when a block end time was entered, how far ahead of it you finished.
+          completionMessage += `\n\nRoute time: ${formatDuration(actualDurationSeconds)}`;
+          if (deadlineTime) {
+            let endMs = parseDeadlineToday(deadlineTime, routeStartedAtMs);
+            if (endMs !== null) {
+              if (endMs <= routeStartedAtMs) endMs += 24 * 60 * 60 * 1000;
+              const diffSec = Math.round((endMs - Date.now()) / 1000);
+              completionMessage +=
+                diffSec >= 0
+                  ? `\nFinished ${formatDuration(diffSec)} before your block ended.`
+                  : `\nFinished ${formatDuration(-diffSec)} after your block ended.`;
+            }
+          }
+          // Learn from this route's real legs, then report the estimated
+          // driving saved vs Amazon's order using the updated calibration.
+          commitRouteLegs(routeStartedAtMs);
+          const finalCompare = compareToAmazonOrder(stops);
+          if (finalCompare && finalCompare.savedSeconds > 0) {
+            const est = estimateSavings(finalCompare.savedSeconds, getCalibration());
+            const label = formatRangeMinutes(est.lowSeconds, est.highSeconds);
+            if (label) {
+              completionMessage += `\n\nEstimated driving saved vs Amazon's order: about ${label}${
+                est.calibrated ? ` (learned from ${est.legsUsed} of your stops)` : ' (rough estimate; it gets sharper as you complete routes)'
+              }.`;
+            }
+          }
           if (typeof blockPayCents === 'number' && actualDurationSeconds > 0) {
             const finalRate = blockPayCents / 100 / (actualDurationSeconds / 3600);
             completionMessage += `\n\nFinal pace: $${finalRate.toFixed(2)}/hr ($${(blockPayCents / 100).toFixed(2)} in ${(actualDurationSeconds / 3600).toFixed(1)}h)`;
@@ -712,7 +777,13 @@ export default function App() {
         alert(completionMessage);
       }
     },
-    [currentIndex, stops, currentRouteId, routeStartedAtMs, routeEstDurationSeconds, blockPayCents, persistStopCompletion, persistRouteCompletion]
+    [currentIndex, stops, currentRouteId, routeStartedAtMs, routeEstDurationSeconds, blockPayCents, deadlineTime, persistStopCompletion, persistRouteCompletion]
+  );
+
+  // Mark any not-yet-completed stop delivered from the list view.
+  const handleMarkDeliveredFromList = useCallback(
+    (stopId) => handleCompleteStop({ stopId, durationSeconds: null }),
+    [handleCompleteStop]
   );
 
   const handleSkipStop = useCallback((skippedStop) => {
@@ -857,26 +928,21 @@ export default function App() {
     [stops, driverPosition]
   );
 
-  // Manual reorder: restricted to stops STRICTLY AFTER currentIndex (the
-  // not-yet-started ones) — not just not-yet-completed. Completed stops
-  // are historical record, not an editable plan, for the reasons
-  // StopListView's doc comment already gives. The current stop itself is
-  // additionally excluded (not just completed ones) because ActiveStopCard,
-  // the GPS arrival geofence, and the "complete/skip" flow all key off
-  // `stops[currentIndex]` as a single source of truth for "where the
-  // driver is headed right now" — silently swapping that out from under
-  // them via a list reorder (rather than the app's existing, explicit
-  // skip-and-requeue flow) would let the driver's actual destination
-  // change without any of those systems knowing. Swapping two *upcoming*
-  // stops has no such hazard, since neither is the active target.
+  // Manual reorder: any stop that isn't completed can move, including the
+  // current one. Completed stops are historical record and stay put. When
+  // the current stop swaps with its neighbor, the neighbor becomes the
+  // active stop: ActiveStopCard, the arrival geofence and navigation all
+  // derive from stops[currentIndex], and the card's stop timer resets when
+  // the stop's id changes, so the new current stop starts a fresh timer.
+  // The current stop can't move "up" past completed stops.
   const handleReorderStop = useCallback(
     (stopId, direction) => {
       setStops((prev) => {
         const idx = prev.findIndex((s) => s.id === stopId);
-        if (idx === -1 || idx <= currentIndex) return prev;
+        if (idx === -1 || idx < currentIndex) return prev;
 
         const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
-        if (targetIdx <= currentIndex || targetIdx >= prev.length) return prev;
+        if (targetIdx < currentIndex || targetIdx >= prev.length) return prev;
 
         const next = [...prev];
         [next[idx], next[targetIdx]] = [next[targetIdx], next[idx]];
@@ -975,6 +1041,7 @@ export default function App() {
     // happened rather than leaving it permanently "in progress" with no
     // completed_at — an abandoned route is a real outcome worth recording,
     // not a reason to silently drop the data.
+    if (routeStartedAtMs) commitRouteLegs(routeStartedAtMs); // an abandoned route's real legs still teach the estimate
     if (currentRouteId && routeStartedAtMs) {
       persistRouteCompletion(currentRouteId, {
         estDurationSeconds: routeEstDurationSeconds,
@@ -1173,6 +1240,7 @@ export default function App() {
                 onCancelEdit={handleCancelEditStop}
                 onSaveEdit={handleSaveEditStop}
                 onReorder={handleReorderStop}
+                onMarkDelivered={handleMarkDeliveredFromList}
               />
             )}
 

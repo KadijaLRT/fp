@@ -1350,3 +1350,36 @@ crossings are not modeled. `ORS_API_KEY` can be deleted from Vercel.
   uses real state abbreviations (all-caps "ST" is no longer mistaken for one).
 - Map labels are forced to bright text with a dark halo for readability.
 - The pace/$-per-hour counter and its post-import prompt were removed.
+
+## Time saved vs Amazon's order: now a calibrated range
+
+The first version showed one confident number from a fixed driving model and
+overstated a real route (predicted 71 min, real saving roughly 20 to 30).
+It now works like this (`src/utils/driveCalibration.js`):
+
+- Each "delivered" tap is logged with time and location. The time between
+  consecutive taps is one real leg (drive + serve). Fitting
+  `leg = service + k * modeled_drive` over many legs gives k, how far the
+  model is off for this driver, and the typical stop time. Outlier legs
+  (breaks, gates) are trimmed. Taps from the list view are excluded.
+- Saved time = modeled difference between the two orders x k x 0.75
+  (caution: an optimizer's own score of its route is always optimistic),
+  shown as a range, rounded outward to 5 minutes.
+- Before 20 legs are learned, a prior of k = 0.35 is used (from the one
+  reported real route) with a wider range.
+- Learning is stored in the browser (localStorage), per device.
+- Still an estimate: the route not driven can't be measured. The 0.75
+  caution factor and the ranges are assumptions, not measurements.
+
+## Real-route refinements
+- Parser: each stop's block now ends at the next stop's header, so windows no longer leak between stops; the stop's own "# code • window" line is preferred. Tags like "Locker" go to notes and show in the list row.
+- Upload screen warns when Amazon stop numbers are missing between the lowest and highest scanned (likely a missing screenshot).
+
+## Map fixes
+- Non-fatal tile/glyph errors no longer replace the map with "failed to load"; style failure retries with a fallback style, then shows a Retry button after 15s.
+- Label restyling is per-layer safe (expression text sizes used to abort setup before the route line/pins).
+- Map re-initialises when geocoding finishes (coordinates arriving after the first render used to leave an empty map).
+- The map container is always mounted so Retry works.
+
+## Robustness pass
+- Coordinate checks use Number.isFinite everywhere in the import flow (undefined/NaN no longer slip through as located).

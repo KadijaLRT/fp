@@ -28,6 +28,7 @@ import React, { useEffect, useRef, useState } from 'react';
  * trusting it fully.
  */
 const OPENFREEMAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/dark';
+const FALLBACK_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 
 export default function RouteMapView({ stops, currentIndex, driverPosition }) {
   const containerRef = useRef(null);
@@ -35,9 +36,13 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
   const markersRef = useRef([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [attempt, setAttempt] = useState(0);
+  const coordKey = stops.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng)).length;
 
   useEffect(() => {
-    const routableStops = stops.filter((s) => typeof s.lat === 'number' && typeof s.lng === 'number');
+    setError(null);
+    setLoading(true);
+    const routableStops = stops.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng));
     if (routableStops.length === 0) {
       setError('No stops have a valid location to show on the map yet.');
       setLoading(false);
@@ -46,6 +51,8 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
 
     let cancelled = false;
     let map = null;
+    let mapLoaded = false;
+    let loadTimer = null;
 
     (async () => {
       try {
@@ -63,28 +70,32 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
 
         map.on('load', () => {
           if (cancelled) return;
+          mapLoaded = true;
+          clearTimeout(loadTimer);
 
           // The dark basemap's street/place names are dim gray on near-black,
           // unreadable at a glance in a moving car. Force every text layer to
           // bright text with a heavy dark halo, and bump the size a little.
-          try {
-            (map.getStyle().layers || []).forEach((layer) => {
-              if (layer.type !== 'symbol' || !layer.layout || !layer.layout['text-field']) return;
+          (map.getStyle().layers || []).forEach((layer) => {
+            if (layer.type !== 'symbol' || !layer.layout || !layer.layout['text-field']) return;
+            // Per-layer try/catch: one odd layer (expression-based size, etc.)
+            // must never stop the route line and pins from being added.
+            try {
               map.setPaintProperty(layer.id, 'text-color', '#f5f5f5');
               map.setPaintProperty(layer.id, 'text-halo-color', '#000000');
               map.setPaintProperty(layer.id, 'text-halo-width', 2);
-              map.setPaintProperty(layer.id, 'text-halo-blur', 0.5);
+            } catch (labelErr) {
+              console.warn('Could not restyle label layer', layer.id, labelErr);
+            }
+            try {
               const size = layer.layout['text-size'];
-              map.setLayoutProperty(
-                layer.id,
-                'text-size',
-                typeof size === 'number' ? size + 2 : ['+', 2, size ?? 12]
-              );
-            });
-          } catch (labelErr) {
-            console.warn('Could not restyle map labels:', labelErr);
-          }
+              if (typeof size === 'number') map.setLayoutProperty(layer.id, 'text-size', size + 2);
+            } catch (sizeErr) {
+              /* leave original size */
+            }
+          });
 
+          try {
           map.addSource('route-line', {
             type: 'geojson',
             data: {
@@ -101,6 +112,9 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
             source: 'route-line',
             paint: { 'line-color': '#f59e0b', 'line-width': 2, 'line-opacity': 0.4, 'line-dasharray': [1, 1.5] }
           });
+          } catch (lineErr) {
+            console.warn('Could not draw route line:', lineErr);
+          }
 
           const bounds = new maplibregl.LngLatBounds();
           routableStops.forEach((s) => bounds.extend([s.lng, s.lat]));
@@ -110,10 +124,29 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
           setLoading(false);
         });
 
+        // Tile/glyph/sprite hiccups fire 'error' constantly on mobile networks
+        // and are non-fatal; only a failure to get the base style (before
+        // 'load') means there is no map. Retry once with a second style,
+        // then give up with a retry button.
+        let triedFallback = false;
         map.on('error', (e) => {
-          console.error('MapLibre GL error:', e);
-          if (!cancelled) setError('Map failed to load.');
+          console.warn('MapLibre GL error:', e && e.error ? e.error.message : e);
+          if (cancelled || mapLoaded) return;
+          const msg = String((e && e.error && e.error.message) || '');
+          const styleFailed = /style|Failed to fetch|NetworkError|Load failed/i.test(msg) && !map.isStyleLoaded();
+          if (styleFailed && !triedFallback) {
+            triedFallback = true;
+            try { map.setStyle(FALLBACK_STYLE_URL); } catch (_) { /* handled by timeout */ }
+          }
         });
+        loadTimer = setTimeout(() => {
+          if (!cancelled && !mapLoaded) {
+            setError('The map could not load. Check your connection and tap Retry.');
+            setLoading(false);
+          }
+        }, 15000);
+        map.on('resize', () => {});
+        requestAnimationFrame(() => map && map.resize());
       } catch (err) {
         console.error('Failed to load MapLibre GL:', err);
         if (!cancelled) {
@@ -125,6 +158,7 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
 
     return () => {
       cancelled = true;
+      clearTimeout(loadTimer);
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
       if (map) map.remove();
@@ -136,7 +170,7 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
     // rebuilding the whole map, which would flash/reset the view on every
     // GPS fix.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stops.length]);
+  }, [stops.length, coordKey, attempt]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -150,7 +184,7 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
       markersRef.current = [];
 
       stops.forEach((stop, idx) => {
-        if (typeof stop.lat !== 'number' || typeof stop.lng !== 'number') return;
+        if (!Number.isFinite(stop.lat) || !Number.isFinite(stop.lng)) return;
 
         const isCompleted = idx < currentIndex;
         const isCurrent = idx === currentIndex;
@@ -202,20 +236,20 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
     })();
   }, [stops, currentIndex, driverPosition, loading]);
 
-  if (error) {
-    return (
-      <div className="max-w-md mx-auto px-4">
-        <div className="bg-neutral-900 border border-neutral-800 rounded-xl p-6 text-center text-sm text-neutral-500">
-          {error}
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="max-w-md mx-auto px-4">
       <div className="relative rounded-xl overflow-hidden border border-neutral-800" style={{ height: '60vh', minHeight: '360px' }}>
-        {loading && (
+        {error && (
+          <div className="absolute inset-0 bg-neutral-900 flex flex-col items-center justify-center z-20 p-6 text-center text-sm text-neutral-400">
+            {error}
+            {!/No stops/.test(error) && (
+              <button onClick={() => setAttempt((n) => n + 1)} className="mt-3 bg-amber-500 text-neutral-950 font-bold px-4 py-2 rounded-lg min-h-[44px]">
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+        {loading && !error && (
           <div className="absolute inset-0 bg-neutral-900 flex items-center justify-center z-10">
             <span className="text-2xl animate-spin">⚙️</span>
           </div>

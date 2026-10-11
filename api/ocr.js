@@ -70,7 +70,7 @@ function validateParsedItinerary(parsed) {
       packageCount: Number.isFinite(Number(raw.packageCount)) && Number(raw.packageCount) > 0
         ? Math.floor(Number(raw.packageCount))
         : 1,
-      deliveryWindow: typeof raw.deliveryWindow === 'string' && raw.deliveryWindow.trim() ? raw.deliveryWindow.trim() : null,
+      deliveryWindow: normalizeWindow(raw.deliveryWindow),
       notes: typeof raw.notes === 'string' && raw.notes.trim() ? raw.notes.trim() : null
     });
   }
@@ -80,6 +80,17 @@ function validateParsedItinerary(parsed) {
   }
 
   return { valid: true, stops: cleanedStops };
+}
+
+// Same rules as normalizeDeliveryWindow in src/utils/deliveryWindow.js (kept
+// as a small copy so this serverless function has no cross-folder import).
+function normalizeWindow(text) {
+  if (typeof text !== 'string') return null;
+  let t = text.replace(/\s+/g, ' ').trim();
+  t = t.replace(/^(?:#\s*\S+\s*[•·|]\s*)?(?:scheduled|deliver)\s+/i, '').replace(/\s+today$/i, '').trim();
+  if (!t) return null;
+  if (/^12:00\s*AM\s*[-–]\s*11:59\s*PM$/i.test(t)) return null;
+  return t;
 }
 
 async function callGroqWithRetry(imageBase64) {
@@ -98,10 +109,11 @@ async function callGroqWithRetry(imageBase64) {
                   text: `Extract the delivery stops from this Amazon Flex "Itinerary List" screenshot.
 Each stop is a row with this layout, top to bottom:
   - a map-pin icon on the LEFT containing the stop number (e.g. 2, 17, 21)
-  - a line like "# SA12 • Scheduled 3:00 - 8:00 AM Today" (SA12 is a station/route code, NOT part of the address and NOT a stop number)
+  - a line like "# G-1.3A • Deliver by 5:00 PM", "# G-1.3A • Deliver 8:00 AM - 3:00 PM", "# G-11.1C • Deliver 12:00 AM - 11:59 PM Today" or "# SA12 • Scheduled 3:00 - 8:00 AM Today" (the code after # such as G-1.3A or SA12 is a route code, NOT part of the address and NOT a stop number)
   - the street address line, which may end with unit text like "3RD FLOOR" or "APT 4"
   - the city line (e.g. "EAST HARTFORD")
   - a line like "Deliver 1 package" or "Deliver 3 packages"
+  - sometimes a small gray tag such as "Locker"
 A row labeled "Next Stop:" is a normal stop: extract it like the others.
 Return ONLY a JSON object, no markdown fences or commentary:
 {
@@ -119,8 +131,9 @@ Rules:
 - stopNumber: the number inside the map pin, exactly as shown. Never renumber and never use the row's position on screen.
 - address: the street line EXACTLY as shown (keep floor/unit text), then a comma, then the city line. Example: "89 GARVAN ST 3RD FLOOR, EAST HARTFORD". Do not include the station code, the schedule text or the package text.
 - packageCount: the number from "Deliver N package(s)"; use 1 only if that line is not visible.
-- deliveryWindow: only the time range, e.g. "3:00 - 8:00 AM"; drop the words "Scheduled" and "Today". null if not shown.
-- notes: any extra instruction text shown for the stop, else null.
+- deliveryWindow: only the time part, e.g. "by 5:00 PM", "8:00 AM - 3:00 PM" or "3:00 - 8:00 AM"; drop the words "Scheduled", "Deliver" and "Today". null if not shown.
+- notes: any gray tag or extra instruction shown for the stop (for example "Locker"), else null.
+- If the same address line appears twice in one row, output it once.
 - Include every fully visible row, in on-screen order. Skip a row that is cut off at the top or bottom edge so that its pin number or address cannot be read with certainty. Never guess.`
                 },
                 { type: 'image_url', image_url: { url: imageBase64 } }

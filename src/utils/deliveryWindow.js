@@ -70,3 +70,23 @@ export function parseDeliveryWindowEnd(windowText, referenceDate = new Date()) {
 
   return result.toISOString();
 }
+
+/**
+ * Cleans a delivery-window string as printed by Flex. Real screens use
+ * "Scheduled 3:00 - 8:00 AM Today", "Deliver by 5:00 PM",
+ * "Deliver 8:00 AM - 3:00 PM" and "Deliver 12:00 AM - 11:59 PM Today".
+ * Leading "Scheduled"/"Deliver" and trailing "Today" are dropped, and the
+ * all-day window (12:00 AM - 11:59 PM) returns null because it is no
+ * constraint at all and would only add noise to the UI and urgency scoring.
+ *
+ * @param {string|null|undefined} text
+ * @returns {string|null}
+ */
+export function normalizeDeliveryWindow(text) {
+  if (typeof text !== 'string') return null;
+  let t = text.replace(/\s+/g, ' ').trim();
+  t = t.replace(/^(?:#\s*\S+\s*[•·|]\s*)?(?:scheduled|deliver)\s+/i, '').replace(/\s+today$/i, '').trim();
+  if (!t) return null;
+  if (/^12:00\s*AM\s*[-–]\s*11:59\s*PM$/i.test(t)) return null;
+  return t;
+}
