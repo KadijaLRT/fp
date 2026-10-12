@@ -1393,3 +1393,6 @@ It now works like this (`src/utils/driveCalibration.js`):
 
 ## Map popups
 - Tapped-pin popups are dark with white text, show 'Stop N' plus a shortened address (no country/zip).
+
+## Stop numbering
+- Stop 1 is the pickup station, so deliveries start at 2: manual/added/review stops and fallback numbering no longer use 1.

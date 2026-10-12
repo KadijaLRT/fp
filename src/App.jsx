@@ -387,7 +387,7 @@ export default function App() {
         const geo = geoResults[idx];
         return {
           id: `stop-${idx + 1}`,
-          stopNumber: stop.stopNumber || idx + 1,
+          stopNumber: stop.stopNumber || idx + 2, // stop 1 is the pickup station
           address: geo.address || stop.address,
           lat: geo.lat,
           lng: geo.lng,
@@ -951,9 +951,7 @@ export default function App() {
           const used = new Set(prev.map((st) => st.stopNumber).filter(Number.isFinite));
           let num = Number.isInteger(stopNumber) && stopNumber > 0 && !used.has(stopNumber) ? stopNumber : null;
           if (num === null) {
-            num = 1;
-            while (used.has(num)) num++;
-            if (used.size) num = Math.max(...used) + 1;
+            num = used.size ? Math.max(...used) + 1 : 2; // stop 1 is the pickup station
           }
           const newStop = {
             id: `stop-added-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,

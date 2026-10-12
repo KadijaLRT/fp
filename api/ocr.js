@@ -128,7 +128,7 @@ Return ONLY a JSON object, no markdown fences or commentary:
   ]
 }
 Rules:
-- stopNumber: the number inside the map pin, exactly as shown. Never renumber and never use the row's position on screen.
+- stopNumber: the number inside the map pin, exactly as shown. Never renumber and never use the row's position on screen. Stop 1 is the pickup station and is normally absent, so numbering usually starts at 2.
 - address: the street line EXACTLY as shown (keep floor/unit text), then a comma, then the city line. Example: "89 GARVAN ST 3RD FLOOR, EAST HARTFORD". Do not include the station code, the schedule text or the package text.
 - packageCount: the number from "Deliver N package(s)"; use 1 only if that line is not visible.
 - deliveryWindow: only the time part, e.g. "by 5:00 PM", "8:00 AM - 3:00 PM" or "3:00 - 8:00 AM"; drop the words "Scheduled", "Deliver" and "Today". null if not shown.

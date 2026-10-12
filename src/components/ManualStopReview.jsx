@@ -23,7 +23,7 @@ function withKey(stop) {
  */
 export default function ManualStopReview({ initialStops, onConfirm, onCancel }) {
   const [stops, setStops] = useState(() =>
-    (initialStops && initialStops.length > 0 ? initialStops : [emptyStop(1)]).map(withKey)
+    (initialStops && initialStops.length > 0 ? initialStops : [emptyStop(2)]).map(withKey)
   );
   const [error, setError] = useState(null);
 
@@ -32,11 +32,11 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
   };
 
   const addStop = () => {
-    setStops((prev) => [...prev, withKey(emptyStop(prev.length + 1))]);
+    setStops((prev) => [...prev, withKey(emptyStop(prev.length + 2))]);
   };
 
   const removeStop = (idx) => {
-    setStops((prev) => prev.filter((_, i) => i !== idx).map((s, i) => ({ ...s, stopNumber: i + 1 })));
+    setStops((prev) => prev.filter((_, i) => i !== idx).map((s, i) => ({ ...s, stopNumber: i + 2 })));
   };
 
   const handleConfirm = () => {

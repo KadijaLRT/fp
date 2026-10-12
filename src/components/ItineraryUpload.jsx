@@ -294,7 +294,8 @@ export default function ItineraryUpload({ onRouteImported }) {
         }
       }
       const used = new Set(byNumber.keys());
-      let candidate = Math.min(...used);
+      // Stop 1 is always the pickup station, so deliveries start at 2.
+      let candidate = 2;
       for (const stop of unnumbered) {
         while (used.has(candidate)) candidate++;
         const { fromReview, ...rest } = stop;
@@ -306,7 +307,7 @@ export default function ItineraryUpload({ onRouteImported }) {
     } else {
       mergedStops = allStops.map(({ fromReview, ...stop }, idx) => {
         void fromReview;
-        return { ...stop, stopNumber: idx + 1 };
+        return { ...stop, stopNumber: idx + 2 };
       });
     }
 
@@ -379,7 +380,7 @@ export default function ItineraryUpload({ onRouteImported }) {
   // failed screenshot's stops in by hand.
   const handleManualEntry = (failedItem) => {
     lastFailedFileRef.current = failedItem || null;
-    setReviewStops([emptyStop(1)]);
+    setReviewStops([emptyStop(2)]);
     setFallbackMode('review');
     setError(null);
   };

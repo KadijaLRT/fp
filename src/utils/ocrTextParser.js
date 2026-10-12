@@ -66,7 +66,7 @@ function stripKnownMetadata(text) {
  */
 export function parseRawOcrText(rawText) {
   if (!rawText || typeof rawText !== 'string') {
-    return [emptyStop(1)];
+    return [emptyStop(2)];
   }
 
   const lines = rawText
@@ -112,7 +112,7 @@ export function parseRawOcrText(rawText) {
     });
 
   if (candidateEntries.length === 0) {
-    return [emptyStop(1)];
+    return [emptyStop(2)];
   }
 
   // Flex screenshots put package count and delivery window either inline
@@ -189,7 +189,7 @@ export function parseRawOcrText(rawText) {
     const streetPart = addressMatch ? addressMatch[0].trim() : addressLineWithoutMetadata;
 
     return {
-      stopNumber: amazonNumber ?? idx + 1,
+      stopNumber: amazonNumber ?? idx + 2, // stop 1 is the pickup station
       address: cityLine ? `${streetPart}, ${cityLine}` : streetPart,
       packageCount: packageMatch ? Math.max(1, parseInt(packageMatch[1], 10)) : 1,
       deliveryWindow: windowMatch ? normalizeDeliveryWindow(windowMatch[0]) : null,
