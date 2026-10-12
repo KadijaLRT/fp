@@ -1383,3 +1383,13 @@ It now works like this (`src/utils/driveCalibration.js`):
 
 ## Robustness pass
 - Coordinate checks use Number.isFinite everywhere in the import flow (undefined/NaN no longer slip through as located).
+
+## Adding stops by hand
+- Upload screen: 'Or type stops in manually' (no screenshot needed).
+- List view: '+ Add a stop' (address, optional Amazon number). Located stops slot in where they add the least driving; unlocated ones go last, flagged for review.
+
+## Address edit fix
+- Geocoder no longer replaces the typed address with the provider's shortened 'formatted' string (which dropped house number/unit). The typed text is kept; street-level-only matches are flagged for review.
+
+## Map popups
+- Tapped-pin popups are dark with white text, show 'Stop N' plus a shortened address (no country/zip).

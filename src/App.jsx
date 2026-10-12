@@ -928,6 +928,77 @@ export default function App() {
     [stops, driverPosition]
   );
 
+  // Add a stop mid-route (an address that never parsed, or one missing from the
+  // screenshots). Located stops slot in where they add the least driving among
+  // the remaining stops; unlocated ones go to the end flagged for review.
+  const handleAddStop = useCallback(
+    async ({ address, stopNumber, packageCount }) => {
+      const trimmed = String(address || '').trim();
+      if (!trimmed) return { ok: false, message: 'Enter an address.' };
+      setIsGeocodingEdit(true);
+      try {
+        let geo;
+        try {
+          geo = await geocodeAddress(trimmed, null, {
+            proximity: driverPosition ? { lat: driverPosition.lat, lng: driverPosition.lng } : { lat: 41.7637, lng: -72.6851 }
+          });
+        } catch (e) {
+          geo = { address: trimmed, lat: null, lng: null, confidence: 0, needsReview: true };
+        }
+        const located = Number.isFinite(geo.lat) && Number.isFinite(geo.lng);
+        let result = { ok: true, message: located ? 'Stop added.' : "Added, but the address couldn't be located. Tap the pencil to fix it." };
+        setStops((prev) => {
+          const used = new Set(prev.map((st) => st.stopNumber).filter(Number.isFinite));
+          let num = Number.isInteger(stopNumber) && stopNumber > 0 && !used.has(stopNumber) ? stopNumber : null;
+          if (num === null) {
+            num = 1;
+            while (used.has(num)) num++;
+            if (used.size) num = Math.max(...used) + 1;
+          }
+          const newStop = {
+            id: `stop-added-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+            stopNumber: num,
+            address: geo.address || trimmed,
+            lat: located ? geo.lat : null,
+            lng: located ? geo.lng : null,
+            confidence: geo.confidence,
+            needsReview: geo.needsReview || !located,
+            packageCount: Number.isInteger(packageCount) && packageCount > 0 ? packageCount : 1,
+            deliveryWindow: null,
+            deliveryWindowEnd: null,
+            notes: null,
+            locationId: null,
+            avgTotalStopSeconds: null,
+            isKnownSlowStop: false
+          };
+          let insertAt = prev.length;
+          if (located) {
+            // Candidate slots: after the current stop up to the end.
+            let best = Infinity;
+            for (let i = Math.min(currentIndex + 1, prev.length); i <= prev.length; i++) {
+              const a = prev[i - 1];
+              const b = prev[i];
+              const d = (p, q) => (p && q && Number.isFinite(p.lat) && Number.isFinite(q.lat) ? distanceMeters(p.lat, p.lng, q.lat, q.lng) : null);
+              const dA = d(a, newStop);
+              const dB = b ? d(newStop, b) : 0;
+              const dAB = a && b ? d(a, b) : 0;
+              if (dA === null || dB === null) continue;
+              const cost = dA + dB - (dAB || 0);
+              if (cost < best) { best = cost; insertAt = i; }
+            }
+          }
+          const next = [...prev];
+          next.splice(insertAt, 0, newStop);
+          return next;
+        });
+        return result;
+      } finally {
+        setIsGeocodingEdit(false);
+      }
+    },
+    [driverPosition, currentIndex]
+  );
+
   // Manual reorder: any stop that isn't completed can move, including the
   // current one. Completed stops are historical record and stay put. When
   // the current stop swaps with its neighbor, the neighbor becomes the
@@ -1241,6 +1312,7 @@ export default function App() {
                 onSaveEdit={handleSaveEditStop}
                 onReorder={handleReorderStop}
                 onMarkDelivered={handleMarkDeliveredFromList}
+                onAddStop={handleAddStop}
               />
             )}
 

@@ -30,6 +30,40 @@ import React, { useEffect, useRef, useState } from 'react';
 const OPENFREEMAP_STYLE_URL = 'https://tiles.openfreemap.org/styles/dark';
 const FALLBACK_STYLE_URL = 'https://tiles.openfreemap.org/styles/liberty';
 
+// Popup content built with DOM nodes + textContent (addresses come from OCR).
+// Drops ", United States of America" and zip noise so it fits on a phone.
+function buildPopupContent(number, address) {
+  const short = String(address || '')
+    .replace(/,?\s*United States( of America)?\s*$/i, '')
+    .replace(/\s+\d{5}(-\d{4})?\s*$/, '')
+    .trim();
+  const wrap = document.createElement('div');
+  const num = document.createElement('div');
+  num.textContent = `Stop ${number}`;
+  num.style.cssText = 'font-weight:800;font-size:13px;color:#f59e0b;margin-bottom:2px;';
+  const addr = document.createElement('div');
+  addr.textContent = short;
+  addr.style.cssText = 'font-weight:600;font-size:15px;line-height:1.3;color:#ffffff;';
+  wrap.appendChild(num);
+  wrap.appendChild(addr);
+  return wrap;
+}
+
+let popupStyleInjected = false;
+function injectPopupStyle() {
+  if (popupStyleInjected || typeof document === 'undefined') return;
+  popupStyleInjected = true;
+  const el = document.createElement('style');
+  el.textContent = `
+    .flexpulse-popup .maplibregl-popup-content { background:#0a0a0a; color:#fff; border:1px solid #f59e0b; border-radius:12px; padding:10px 12px; box-shadow:0 4px 16px rgba(0,0,0,.6); }
+    .flexpulse-popup.maplibregl-popup-anchor-top .maplibregl-popup-tip { border-bottom-color:#f59e0b; }
+    .flexpulse-popup.maplibregl-popup-anchor-bottom .maplibregl-popup-tip { border-top-color:#f59e0b; }
+    .flexpulse-popup.maplibregl-popup-anchor-left .maplibregl-popup-tip { border-right-color:#f59e0b; }
+    .flexpulse-popup.maplibregl-popup-anchor-right .maplibregl-popup-tip { border-left-color:#f59e0b; }
+  `;
+  document.head.appendChild(el);
+}
+
 export default function RouteMapView({ stops, currentIndex, driverPosition }) {
   const containerRef = useRef(null);
   const mapRef = useRef(null);
@@ -40,6 +74,7 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
   const coordKey = stops.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng)).length;
 
   useEffect(() => {
+    injectPopupStyle();
     setError(null);
     setLoading(true);
     const routableStops = stops.filter((s) => Number.isFinite(s.lat) && Number.isFinite(s.lng));
@@ -216,7 +251,11 @@ export default function RouteMapView({ stops, currentIndex, driverPosition }) {
 
         const marker = new maplibregl.Marker({ element: el })
           .setLngLat([stop.lng, stop.lat])
-          .setPopup(new maplibregl.Popup({ offset: 18 }).setText(`${Number.isFinite(stop.stopNumber) ? stop.stopNumber : idx + 1}. ${stop.address}`))
+          .setPopup(
+            new maplibregl.Popup({ offset: 18, className: 'flexpulse-popup', maxWidth: '260px', closeButton: false }).setDOMContent(
+              buildPopupContent(Number.isFinite(stop.stopNumber) ? stop.stopNumber : idx + 1, stop.address)
+            )
+          )
           .addTo(map);
         markersRef.current.push(marker);
       });

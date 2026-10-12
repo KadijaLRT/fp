@@ -29,8 +29,27 @@ export default function StopListView({
   onCancelEdit,
   onSaveEdit,
   onReorder,
-  onMarkDelivered
+  onMarkDelivered,
+  onAddStop
 }) {
+  const [addOpen, setAddOpen] = useState(false);
+  const [addAddress, setAddAddress] = useState('');
+  const [addNumber, setAddNumber] = useState('');
+  const [addMsg, setAddMsg] = useState(null);
+  const [adding, setAdding] = useState(false);
+  const submitAdd = async () => {
+    if (adding || !addAddress.trim() || !onAddStop) return;
+    setAdding(true);
+    try {
+      const n = parseInt(addNumber, 10);
+      const r = await onAddStop({ address: addAddress, stopNumber: Number.isInteger(n) && n > 0 ? n : null });
+      setAddMsg(r?.message || null);
+      if (r?.ok) { setAddAddress(''); setAddNumber(''); }
+    } finally {
+      setAdding(false);
+    }
+  };
+
   const [expandedId, setExpandedId] = useState(null);
   const [draftAddress, setDraftAddress] = useState('');
   // Which row is showing the "Mark delivered?" confirmation (two taps, so a
@@ -241,6 +260,47 @@ export default function StopListView({
           );
         })}
       </div>
+      {onAddStop && (
+        <div className="mt-3">
+          {!addOpen ? (
+            <button
+              onClick={() => setAddOpen(true)}
+              className="w-full min-h-[48px] rounded-xl border border-dashed border-neutral-700 text-neutral-200 text-sm font-semibold"
+            >
+              + Add a stop
+            </button>
+          ) : (
+            <div className="rounded-xl bg-neutral-900 border border-neutral-800 p-3 space-y-2">
+              <input
+                value={addAddress}
+                onChange={(e) => setAddAddress(e.target.value)}
+                placeholder="Street address, city"
+                className="w-full h-11 rounded-lg bg-neutral-950 border border-neutral-700 text-neutral-100 px-3 text-sm"
+              />
+              <input
+                value={addNumber}
+                onChange={(e) => setAddNumber(e.target.value.replace(/\D/g, '').slice(0, 3))}
+                inputMode="numeric"
+                placeholder="Amazon stop number (optional)"
+                className="w-full h-11 rounded-lg bg-neutral-950 border border-neutral-700 text-neutral-100 px-3 text-sm"
+              />
+              {addMsg && <p className="text-xs text-amber-300">{addMsg}</p>}
+              <div className="flex gap-2">
+                <button onClick={() => { setAddOpen(false); setAddMsg(null); }} className="flex-1 h-11 rounded-lg bg-neutral-800 text-neutral-200 text-sm font-semibold">
+                  Done
+                </button>
+                <button
+                  onClick={submitAdd}
+                  disabled={adding || !addAddress.trim()}
+                  className="flex-1 h-11 rounded-lg bg-amber-500 text-neutral-950 text-sm font-bold disabled:opacity-50"
+                >
+                  {adding ? 'Locating…' : 'Add stop'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

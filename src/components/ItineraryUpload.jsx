@@ -468,6 +468,14 @@ export default function ItineraryUpload({ onRouteImported }) {
             className="hidden"
           />
         </label>
+        <button
+          type="button"
+          onClick={() => handleManualEntry(null)}
+          disabled={fallbackMode === 'scanning'}
+          className="mt-3 text-sm text-neutral-300 underline min-h-[44px]"
+        >
+          Or type stops in manually
+        </button>
         <p className="text-[11px] text-neutral-600 mt-2">
           Select several at once from your photo library, or add more one batch at a time.
         </p>

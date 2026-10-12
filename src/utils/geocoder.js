@@ -189,7 +189,8 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
   // never change what a fresh lookup would have returned.
   const cached = getCachedGeocode(trimmedAddress);
   if (cached) {
-    return { ...cached, error: null };
+    // Older cache entries stored the provider's shortened address; always show the typed one.
+    return { ...cached, address: trimmedAddress, error: null };
   }
 
   const queryAddress = addRegionHintIfMissing(stripUnitInfo(trimmedAddress) || trimmedAddress);
@@ -242,12 +243,21 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
       const rawConfidence = typeof match.confidence === 'number' ? match.confidence : 0;
       const confidence = Math.round((rawConfidence / 10) * 100);
 
+      // Keep the address EXACTLY as the driver typed/scanned it for display.
+      // OpenCage's `formatted` string drops house numbers and units whenever
+      // it only matches the street (e.g. "Main Street, Hartford, CT"), which
+      // used to overwrite a corrected address with just street + city/state.
+      // The provider's version is kept separately for reference only.
+      const typedHasHouseNumber = /^\s*\d+/.test(trimmedAddress);
+      const matchedHouseNumber = Boolean(match.components && match.components.house_number);
+      const streetLevelOnly = typedHasHouseNumber && match.components && !matchedHouseNumber;
       const result = {
-        address: match.formatted || trimmedAddress,
+        address: trimmedAddress,
+        matchedAddress: match.formatted || null,
         lat: geometry.lat,
         lng: geometry.lng,
         confidence,
-        needsReview: confidence < 80,
+        needsReview: confidence < 80 || Boolean(streetLevelOnly),
         error: null
       };
       setCachedGeocode(trimmedAddress, result);
