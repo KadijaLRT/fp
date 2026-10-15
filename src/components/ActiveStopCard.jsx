@@ -27,6 +27,32 @@ const VEHICLE_ZONES = [
   { value: 'trunk_center', label: '📦 Trunk Ctr' }
 ];
 
+const STOP_TIMER_KEY = 'flexpulse.stopTimer.v1';
+
+function getStopStart(stopId) {
+  const now = Date.now();
+  if (!stopId) return now;
+  try {
+    const saved = JSON.parse(localStorage.getItem(STOP_TIMER_KEY) || 'null');
+    if (saved && saved.stopId === stopId && Number.isFinite(saved.startedAt) && saved.startedAt <= now) {
+      return saved.startedAt;
+    }
+    localStorage.setItem(STOP_TIMER_KEY, JSON.stringify({ stopId, startedAt: now }));
+  } catch {
+    /* storage unavailable: timer still works for this mount */
+  }
+  return now;
+}
+
+function clearStopStart(stopId) {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STOP_TIMER_KEY) || 'null');
+    if (saved && saved.stopId === stopId) localStorage.removeItem(STOP_TIMER_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 export default function ActiveStopCard({
   currentStop,
   totalStops,
@@ -43,7 +69,12 @@ export default function ActiveStopCard({
   geoError,
   preferredMapApp = 'google'
 }) {
-  const [seconds, setSeconds] = useState(0);
+  // Elapsed time is derived from an absolute start timestamp (persisted per
+  // stop), never from counting ticks: ticks freeze when the phone sleeps or the
+  // tab is backgrounded, and component state is lost when switching Card/List/Map.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [startedAt, setStartedAt] = useState(() => getStopStart(currentStop?.id));
+  const [frozenSeconds, setFrozenSeconds] = useState(null);
   const [isTimerRunning, setIsTimerRunning] = useState(true);
   const [navError, setNavError] = useState(null);
   const [actionPending, setActionPending] = useState(false);
@@ -57,27 +88,32 @@ export default function ActiveStopCard({
   const actionLockRef = useRef(false);
 
   useEffect(() => {
-    if (isTimerRunning) {
-      intervalRef.current = setInterval(() => {
-        setSeconds((prev) => prev + 1);
-      }, 1000);
-    } else if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-    }
+    if (!isTimerRunning) return undefined;
+    const tick = () => setNowMs(Date.now());
+    const id = setInterval(tick, 1000);
+    const onVisible = () => { if (document.visibilityState === 'visible') tick(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', tick);
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', tick);
     };
   }, [isTimerRunning]);
 
-  // Reset the timer whenever the underlying stop changes (e.g. after a skip
-  // reorders the queue) instead of only on explicit "Delivered" taps.
+  // New stop: load (or create) its persisted start time. Remounting the card
+  // for the SAME stop (view switch, refresh) keeps the running clock.
   useEffect(() => {
-    setSeconds(0);
+    setStartedAt(getStopStart(currentStop?.id));
+    setNowMs(Date.now());
+    setFrozenSeconds(null);
     setIsTimerRunning(true);
     setNavError(null);
     setActionPending(false);
     actionLockRef.current = false;
   }, [currentStop?.id]);
+
+  const seconds = frozenSeconds !== null ? frozenSeconds : Math.max(0, Math.floor((nowMs - startedAt) / 1000));
 
   const formatTime = (totalSec) => {
     const mins = Math.floor(totalSec / 60);
@@ -107,10 +143,13 @@ export default function ActiveStopCard({
     if (actionLockRef.current) return;
     actionLockRef.current = true;
     setActionPending(true);
+    const finalSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    setFrozenSeconds(finalSeconds);
     setIsTimerRunning(false);
+    clearStopStart(currentStop.id);
     onCompleteStop?.({
       stopId: currentStop.id,
-      durationSeconds: seconds
+      durationSeconds: finalSeconds
     });
   };
 

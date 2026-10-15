@@ -62,6 +62,12 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
+// Real starting point for the optimizer when the driver's GPS is known; null
+// lets the optimizer choose the best starting stop itself.
+function originForOptimize(pos) {
+  return pos && Number.isFinite(pos.lat) && Number.isFinite(pos.lng) ? { lat: pos.lat, lng: pos.lng } : null;
+}
+
 export default function App() {
   const [session, setSession] = useState(undefined); // undefined = still checking
   const [stops, setStops] = useState([]);
@@ -168,6 +174,21 @@ export default function App() {
     // after a driver legitimately finishes a route).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
+
+  // When the block end time passes with the route still open, ask once.
+  useEffect(() => {
+    if (stops.length === 0 || !deadlineTime) return undefined;
+    const check = () => {
+      if (endPromptDismissedRef.current) return;
+      const startMs = routeStartedAtMs || Date.now();
+      let endMs = parseDeadlineToday(deadlineTime, startMs);
+      if (endMs !== null && endMs <= startMs) endMs += 24 * 3600 * 1000;
+      if (endMs !== null && Date.now() > endMs) setEndPrompt((prev) => prev || 'time');
+    };
+    check();
+    const id = setInterval(check, 30000);
+    return () => clearInterval(id);
+  }, [stops.length, deadlineTime, routeStartedAtMs]);
 
   const handleRestoreRoute = () => {
     if (!restorableRoute) return;
@@ -495,7 +516,7 @@ export default function App() {
             fetch('/api/optimize', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ stops: routableStops })
+              body: JSON.stringify({ stops: routableStops, origin: originForOptimize(driverPosition) })
             }),
             computeOptimizeTimeoutMs(routableStops.length)
           );
@@ -610,7 +631,7 @@ export default function App() {
     } finally {
       setIsProcessingRoute(false);
     }
-  }, [session]);
+  }, [session, driverPosition]);
 
   const fetchRouteExplanation = async (originalOrder, newOrder) => {
     try {
@@ -687,6 +708,7 @@ export default function App() {
       // Log the tap time and place so real leg times can teach the
       // time-saved estimate (see utils/driveCalibration.js). List-view
       // taps carry no timer, so they're flagged and excluded from learning.
+      lastDeliveredAtRef.current = Date.now();
       const loggedStop = stops.find((s) => s.id === stopMetrics.stopId);
       if (routeStartedAtMs && loggedStop) {
         logCompletion(routeStartedAtMs, {
@@ -764,6 +786,9 @@ export default function App() {
             completionMessage += `\n\nFinal pace: $${finalRate.toFixed(2)}/hr ($${(blockPayCents / 100).toFixed(2)} in ${(actualDurationSeconds / 3600).toFixed(1)}h)`;
           }
         }
+        lastDeliveredAtRef.current = null;
+        endPromptDismissedRef.current = false;
+        setEndPrompt(null);
         setStops([]);
         setCurrentIndex(0);
         setCurrentRouteId(null);
@@ -854,6 +879,11 @@ export default function App() {
   // letting the driver edit at all, since the UI would show a corrected
   // address string while still navigating to the wrong place.
   const [routeNotice, setRouteNotice] = useState(null);
+  // End-of-block handling: remembers the last real delivery so a forgotten
+  // "end block" is still recorded at the time the work actually finished.
+  const lastDeliveredAtRef = useRef(null);
+  const [endPrompt, setEndPrompt] = useState(null); // null | 'manual' | 'time'
+  const endPromptDismissedRef = useRef(false);
   const [editingStopId, setEditingStopId] = useState(null);
   const [isGeocodingEdit, setIsGeocodingEdit] = useState(false);
 
@@ -1053,7 +1083,7 @@ export default function App() {
           fetch('/api/optimize', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ stops: routableRemaining })
+            body: JSON.stringify({ stops: routableRemaining, origin: originForOptimize(driverPosition) })
           }),
           computeOptimizeTimeoutMs(routableRemaining.length)
         );
@@ -1102,21 +1132,28 @@ export default function App() {
     }
 
     setIsReoptimizing(false);
-  }, [stops, currentIndex, isOnline, isReoptimizing, currentRouteId, routeStartedAtMs, routeEstDurationSeconds]);
+  }, [stops, currentIndex, isOnline, isReoptimizing, currentRouteId, routeStartedAtMs, routeEstDurationSeconds, driverPosition]);
 
   const handleNewRoute = () => {
-    // If the driver abandons a route mid-way (taps "New Route" instead of
-    // finishing), still close out the DB row with whatever actually
-    // happened rather than leaving it permanently "in progress" with no
-    // completed_at — an abandoned route is a real outcome worth recording,
-    // not a reason to silently drop the data.
+    // Ending the block (or abandoning it): the route's real end is the LAST
+    // DELIVERY, not whenever the driver remembered to tap this.
+    const endedAtMs = lastDeliveredAtRef.current || Date.now();
+    const deliveredCount = Math.min(currentIndex, stops.length);
+    const summary =
+      routeStartedAtMs && deliveredCount > 0
+        ? `${deliveredCount} of ${stops.length} stops delivered in ${formatDuration(Math.max(0, (endedAtMs - routeStartedAtMs) / 1000))}.`
+        : null;
     if (routeStartedAtMs) commitRouteLegs(routeStartedAtMs); // an abandoned route's real legs still teach the estimate
     if (currentRouteId && routeStartedAtMs) {
       persistRouteCompletion(currentRouteId, {
         estDurationSeconds: routeEstDurationSeconds,
-        actualDurationSeconds: (Date.now() - routeStartedAtMs) / 1000
+        actualDurationSeconds: Math.max(0, (endedAtMs - routeStartedAtMs) / 1000)
       });
     }
+    lastDeliveredAtRef.current = null;
+    endPromptDismissedRef.current = false;
+    setEndPrompt(null);
+    if (summary) setRouteNotice({ title: 'Block ended', message: summary });
     setStops([]);
     setCurrentIndex(0);
     setCompletedStops([]);
@@ -1176,10 +1213,10 @@ export default function App() {
           </button>
           {stops.length > 0 && (
             <button
-              onClick={handleNewRoute}
-              className="text-xs bg-neutral-800 hover:bg-neutral-700 px-2.5 py-1.5 rounded-lg text-neutral-400 transition-all min-h-[36px]"
+              onClick={() => setEndPrompt('manual')}
+              className="text-xs bg-neutral-800 hover:bg-neutral-700 px-2.5 py-1.5 rounded-lg text-neutral-300 transition-all min-h-[36px]"
             >
-              New
+              End block
             </button>
           )}
           {supabase && session && (
@@ -1384,6 +1421,32 @@ export default function App() {
         />
       )}
 
+      {endPrompt && stops.length > 0 && (
+        <div className="fixed inset-0 bg-black/60 flex items-end sm:items-center justify-center z-50" role="dialog" aria-modal="true">
+          <div className="bg-neutral-900 border border-neutral-800 w-full sm:max-w-sm sm:rounded-2xl rounded-t-2xl px-5 pt-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))]">
+            <h2 className="text-lg font-bold text-neutral-50 mb-2">
+              {endPrompt === 'time' ? 'Your block end time has passed' : 'End this block?'}
+            </h2>
+            <p className="text-sm text-neutral-300 mb-5 leading-relaxed">
+              {currentIndex} of {stops.length} stops delivered.
+              {stops.length - currentIndex > 0 ? ` ${stops.length - currentIndex} not delivered will be left as is.` : ''}
+              {lastDeliveredAtRef.current ? ' Your finish time is recorded as your last delivery.' : ''}
+            </p>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => { endPromptDismissedRef.current = true; setEndPrompt(null); }}
+                className="flex-1 h-12 rounded-xl bg-neutral-800 text-neutral-200 font-semibold"
+              >
+                Keep going
+              </button>
+              <button type="button" onClick={handleNewRoute} className="flex-1 h-12 rounded-xl bg-amber-500 text-neutral-950 font-bold">
+                End block
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {routeNotice && (
         <RouteNoticeModal title={routeNotice.title} message={routeNotice.message} onClose={() => setRouteNotice(null)} />
       )}

@@ -74,8 +74,14 @@ export default function StopListView({
   return (
     <div className="max-w-md mx-auto px-4">
       <div className="space-y-1.5">
-        {stops.map((stop, idx) => {
+        {/* Remaining stops first, delivered stops at the bottom. Indices stay the
+            real positions in the route, only the display order changes. */}
+        {[...stops.keys()]
+          .sort((a, b) => (a < currentIndex) - (b < currentIndex) || a - b)
+          .map((idx) => {
+          const stop = stops[idx];
           const isCompleted = idx < currentIndex;
+          const showDeliveredHeader = isCompleted && idx === 0;
           const isCurrent = idx === currentIndex;
           const isExpanded = expandedId === stop.id;
           const isEditing = editingStopId === stop.id;
@@ -90,8 +96,13 @@ export default function StopListView({
           const isConfirmingDelivered = confirmDeliveredId === stop.id;
 
           return (
+            <React.Fragment key={stop.id}>
+            {showDeliveredHeader && (
+              <p className="pt-3 pb-1 text-xs font-bold uppercase tracking-wider text-emerald-500">
+                Delivered ({currentIndex})
+              </p>
+            )}
             <div
-              key={stop.id}
               className={`w-full rounded-xl border px-3 py-2.5 transition-all ${
                 isCurrent
                   ? 'bg-amber-950/40 border-amber-600'
@@ -257,6 +268,7 @@ export default function StopListView({
                 )
               )}
             </div>
+            </React.Fragment>
           );
         })}
       </div>

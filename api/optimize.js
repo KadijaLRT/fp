@@ -119,12 +119,12 @@ function totalRouteCost(orderIdxs, stops, durations, strategy, nowMs) {
  * classic TSP failure mode). Produces the starting tour that 2-opt then
  * refines.
  */
-function nearestNeighborOrder(stops, durations, strategy, nowMs) {
+function nearestNeighborOrder(stops, durations, strategy, nowMs, startIdx = 0) {
   const n = stops.length;
   const visited = new Array(n).fill(false);
-  const order = [0];
-  visited[0] = true;
-  let current = 0;
+  const order = [startIdx];
+  visited[startIdx] = true;
+  let current = startIdx;
 
   for (let step = 1; step < n; step++) {
     let bestIdx = -1;
@@ -211,16 +211,86 @@ function twoOptImprove(initialOrder, stops, durations, strategy, nowMs) {
 }
 
 /**
- * Nearest-neighbor construction followed by 2-opt refinement. Not a true
- * global TSP optimum (that's NP-hard), but meaningfully better than
- * nearest-neighbor alone — 2-opt specifically eliminates the "zig-zag"
- * crossings greedy construction is prone to leaving behind.
+ * Or-opt: move a block of 1-3 consecutive stops to a better position
+ * (optionally reversed). 2-opt alone can't fix a single stop that sits on
+ * the wrong "side" of the route, which is exactly what shows up as
+ * backtracking (drive past a stop, come back for it later). `fixedStart`
+ * keeps index 0 of the path in place (used when a real origin is given).
  */
-function solveRoute(stops, durations, strategy) {
+function orOptImprove(initialOrder, stops, durations, strategy, nowMs, deadline, fixedStart) {
+  let route = initialOrder.slice();
+  const minPos = fixedStart ? 1 : 0;
+  let improved = true;
+  let best = totalRouteCost(route, stops, durations, strategy, nowMs);
+
+  while (improved && Date.now() < deadline) {
+    improved = false;
+    for (let len = 1; len <= 3 && !improved; len++) {
+      for (let i = minPos; i + len <= route.length && !improved; i++) {
+        const segment = route.slice(i, i + len);
+        const rest = [...route.slice(0, i), ...route.slice(i + len)];
+        for (let k = minPos; k <= rest.length; k++) {
+          if (k === i) continue;
+          for (const seg of len > 1 ? [segment, [...segment].reverse()] : [segment]) {
+            const candidate = [...rest.slice(0, k), ...seg, ...rest.slice(k)];
+            const c = totalRouteCost(candidate, stops, durations, strategy, nowMs);
+            if (c < best - 0.01) {
+              best = c;
+              route = candidate;
+              improved = true;
+              break;
+            }
+          }
+          if (improved) break;
+        }
+      }
+    }
+  }
+  return route;
+}
+
+/**
+ * Builds nearest-neighbor tours from EVERY possible start (or only the
+ * fixed origin), keeps the best few, then refines them with 2-opt and
+ * Or-opt until neither finds an improvement, and returns the cheapest.
+ * Starting from every stop matters: the old code always began at the first
+ * stop in the list, which forced the whole route to be built around an
+ * arbitrary starting point and created long backtracking legs.
+ */
+function solveRoute(stops, durations, strategy, fixedStart = false) {
   const nowMs = Date.now();
-  const initialOrder = nearestNeighborOrder(stops, durations, strategy, nowMs);
-  const refinedOrder = twoOptImprove(initialOrder, stops, durations, strategy, nowMs);
-  return refinedOrder;
+  const n = stops.length;
+  const starts = fixedStart ? [0] : Array.from({ length: n }, (_, i) => i);
+
+  const seeds = starts
+    .map((st) => {
+      const order = nearestNeighborOrder(stops, durations, strategy, nowMs, st);
+      return { order, cost: totalRouteCost(order, stops, durations, strategy, nowMs) };
+    })
+    .sort((a, b) => a.cost - b.cost)
+    .slice(0, 4);
+
+  const deadline = Date.now() + 4000;
+  let bestOrder = seeds[0].order;
+  let bestCost = seeds[0].cost;
+  for (const seed of seeds) {
+    if (Date.now() > deadline) break;
+    let order = seed.order;
+    // Alternate until neither move type improves (bounded by the deadline).
+    for (let round = 0; round < 6 && Date.now() < deadline; round++) {
+      const before = totalRouteCost(order, stops, durations, strategy, nowMs);
+      order = twoOptImprove(order, stops, durations, strategy, nowMs);
+      order = orOptImprove(order, stops, durations, strategy, nowMs, deadline, fixedStart);
+      const after = totalRouteCost(order, stops, durations, strategy, nowMs);
+      if (after >= before - 0.01) break;
+    }
+    const cost = totalRouteCost(order, stops, durations, strategy, nowMs);
+    if (cost < bestCost) {
+      bestCost = cost;
+      bestOrder = order;
+    }
+  }
+  return bestOrder;
 }
 
 /**
@@ -251,7 +321,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { stops, strategy = 'fastest' } = req.body || {};
+    const { stops, strategy = 'fastest', origin = null } = req.body || {};
 
     if (!Array.isArray(stops) || stops.length < 2) {
       return res.status(400).json({ error: 'At least 2 stops with coordinates are required.' });
@@ -273,11 +343,17 @@ export default async function handler(req, res) {
       });
     }
 
-    const durations = buildFullDurationMatrix(stops);
+    // Optional real starting point (the driver's position): added as a
+    // fixed virtual first node, then stripped from the result. Without one
+    // the route may start at whichever stop makes the whole path shortest.
+    const hasOrigin = isValidCoord(origin);
+    const nodes = hasOrigin ? [{ id: '__origin__', lat: origin.lat, lng: origin.lng }, ...stops] : stops;
+    const durations = buildFullDurationMatrix(nodes);
 
-    const optimizedOrderIdxs = solveRoute(stops, durations, strategy);
-    const optimizedStops = optimizedOrderIdxs.map((idx) => stops[idx]);
-    const estimatedDrivingSeconds = estimateDrivingSeconds(optimizedOrderIdxs, durations);
+    let orderIdxs = solveRoute(nodes, durations, strategy, hasOrigin);
+    const estimatedDrivingSeconds = estimateDrivingSeconds(orderIdxs, durations);
+    if (hasOrigin) orderIdxs = orderIdxs.filter((i) => i !== 0).map((i) => i - 1);
+    const optimizedStops = orderIdxs.map((idx) => stops[idx]);
 
     return res.status(200).json({
       success: true,

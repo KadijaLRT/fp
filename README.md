@@ -1396,3 +1396,21 @@ It now works like this (`src/utils/driveCalibration.js`):
 
 ## Stop numbering
 - Stop 1 is the pickup station, so deliveries start at 2: manual/added/review stops and fallback numbering no longer use 1.
+
+## Upload summary
+- Missing stop numbers shown as ranges with a count; Continue count reflects stops after merging repeats; repeats are reported.
+
+## Misread stop numbers
+- Same number with a different address is no longer treated as a duplicate (it used to drop a real stop).
+- Checkbox on the upload screen: ignore scanned numbers and number stops 2, 3, 4... in screenshot order.
+
+## List order
+- Delivered stops now sit at the bottom of the list under a 'Delivered (n)' heading; remaining stops stay on top.
+
+## Less backtracking + timer fix
+- Optimizer: tries a nearest-neighbor tour from every possible start (the old code was forced to begin at the first listed stop), then refines with 2-opt and Or-opt (moving 1-3 stop blocks) until no move helps. Uses the driver's GPS position as the fixed start when available (`origin`).
+- Stop timer: derived from a saved start time per stop, so it no longer freezes when the phone sleeps/backgrounds, no longer resets when switching Card/List/Map, and survives a refresh.
+
+## Ending the block
+- Header button is now "End block" (confirm sheet, "Keep going" / "End block"); ending shows a summary and records the finish time as the LAST DELIVERY, not when you remembered to end it.
+- If your block end time passes while the route is still open, a prompt asks once whether to end it.
