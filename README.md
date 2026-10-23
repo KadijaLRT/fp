@@ -1414,3 +1414,6 @@ It now works like this (`src/utils/driveCalibration.js`):
 ## Ending the block
 - Header button is now "End block" (confirm sheet, "Keep going" / "End block"); ending shows a summary and records the finish time as the LAST DELIVERY, not when you remembered to end it.
 - If your block end time passes while the route is still open, a prompt asks once whether to end it.
+
+## Buttons
+- Stop card: DELIVERED is the large top button; NAVIGATE now sits beside SKIP.

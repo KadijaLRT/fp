@@ -334,23 +334,24 @@ export default function ActiveStopCard({
         )}
 
         <div className="space-y-2 mt-3">
+          {/* DELIVERED is the big primary button; NAVIGATE sits beside SKIP. */}
           <button
-            onClick={() => triggerNavigation()}
-            disabled={!hasValidCoords}
-            className="w-full bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-800 disabled:text-neutral-600 disabled:cursor-not-allowed active:scale-98 text-neutral-950 font-extrabold py-3.5 rounded-xl transition-all flex items-center justify-center gap-2 min-h-[48px] text-base"
+            onClick={handleDone}
+            disabled={actionPending}
+            className={`w-full bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 active:scale-98 text-white font-extrabold py-3.5 rounded-xl shadow transition-all flex items-center justify-center gap-2 min-h-[48px] text-base ${
+              proximity?.arrived ? 'ring-4 ring-emerald-400' : ''
+            }`}
           >
-            <span>🧭 NAVIGATE</span>
+            {actionPending ? 'Saving…' : '✓ DELIVERED'}
           </button>
 
           <div className="grid grid-cols-2 gap-2 pt-1">
             <button
-              onClick={handleDone}
-              disabled={actionPending}
-              className={`bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 active:scale-98 text-white font-bold py-3 rounded-xl shadow transition-all min-h-[48px] ${
-                proximity?.arrived ? 'ring-4 ring-emerald-400' : ''
-              }`}
+              onClick={() => triggerNavigation()}
+              disabled={!hasValidCoords}
+              className="bg-amber-500 hover:bg-amber-600 disabled:bg-neutral-800 disabled:text-neutral-600 disabled:cursor-not-allowed active:scale-98 text-neutral-950 font-bold py-3 rounded-xl transition-all min-h-[48px]"
             >
-              {actionPending ? 'Saving…' : '✓ DELIVERED'}
+              🧭 NAVIGATE
             </button>
             <button
               onClick={handleSkip}
