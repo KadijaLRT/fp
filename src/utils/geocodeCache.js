@@ -22,7 +22,8 @@
  * network call for an address it's already confident about.
  */
 
-const STORAGE_KEY = 'flexGeocodeCache';
+// v2: v1 held matches forced into CT by the old default region hint.
+const STORAGE_KEY = 'flexGeocodeCache.v2';
 const MAX_ENTRIES = 500;
 // Re-verify with the geocoding provider periodically rather than trusting a cached
 // coordinate forever — addresses do occasionally get corrected/renamed,
@@ -80,7 +81,10 @@ export function getCachedGeocode(rawAddress) {
       lat: entry.lat,
       lng: entry.lng,
       confidence: entry.confidence,
-      needsReview: entry.needsReview
+      needsReview: entry.needsReview,
+      matchedAddress: entry.matchedAddress || null,
+      reviewReason: entry.reviewReason || null,
+      candidates: Array.isArray(entry.candidates) ? entry.candidates : []
     };
   } catch {
     return null;
@@ -105,6 +109,9 @@ export function setCachedGeocode(rawAddress, result) {
       lng: result.lng,
       confidence: result.confidence,
       needsReview: result.needsReview,
+      matchedAddress: result.matchedAddress || null,
+      reviewReason: result.reviewReason || null,
+      candidates: Array.isArray(result.candidates) ? result.candidates.slice(0, 5) : [],
       cachedAt: Date.now()
     };
     saveCache(cache);

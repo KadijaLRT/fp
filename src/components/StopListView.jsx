@@ -219,7 +219,7 @@ export default function StopListView({
                       <p className="text-[11px] text-neutral-600 mt-0.5">
                         {stop.packageCount || 1} pkg{(stop.packageCount || 1) === 1 ? '' : 's'}
                         {stop.deliveryWindow ? ` · ${stop.deliveryWindow}` : ''}
-                        {stop.needsReview ? ' · ⚠️ low-confidence address' : ''}
+                        {stop.needsReview ? ` · ⚠️ ${stop.reviewReason || 'low-confidence address'}` : ''}
                         {stop.notes && stop.notes.length <= 20 ? ` · ${stop.notes}` : ''}
                       </p>
                     )}

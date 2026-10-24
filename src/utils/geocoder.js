@@ -109,19 +109,13 @@ function getRegionHint() {
 }
 
 function addRegionHintIfMissing(address) {
-  if (hasStateAtEnd(address)) {
-    return address;
-  }
-  const hint = getRegionHint();
-  if (hasLikelyCity(address)) {
-    // A city is already present — only the state (and the hint's own
-    // city, which would be redundant/wrong here) is actually missing.
-    // getRegionHint() is "City, ST" by convention, so just the part after
-    // the comma is appended.
-    const stateOnly = hint.includes(',') ? hint.split(',').slice(1).join(',').trim() : hint;
-    return `${address}, ${stateOnly}`;
-  }
-  return `${address}, ${hint}`;
+  if (hasStateAtEnd(address)) return address;
+  // A city is already named: do NOT force a state onto it. The old code
+  // appended "CT" here, which pushed every Massachusetts stop into
+  // Connecticut. Ambiguous city names are resolved afterwards against the
+  // rest of the route (resolveGeocodeCluster).
+  if (hasLikelyCity(address)) return address;
+  return `${address}, ${getRegionHint()}`;
 }
 
 function withTimeout(promise, ms) {
@@ -130,6 +124,148 @@ function withTimeout(promise, ms) {
     timeoutId = setTimeout(() => reject(new Error('Geocoding request timed out')), ms);
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+
+// ---- candidates and route-level disambiguation ----
+
+function toCandidate(r) {
+  const rawConfidence = typeof r.confidence === 'number' ? r.confidence : 0;
+  return {
+    lat: r.geometry.lat,
+    lng: r.geometry.lng,
+    // OpenCage confidence is 0-10; the app uses 0-100.
+    confidence: Math.round((rawConfidence / 10) * 100),
+    score: typeof r.score === 'number' ? r.score : rawConfidence / 10,
+    matchedAddress: r.formatted || null,
+    houseMatch: Boolean(r.components && r.components.house_number)
+  };
+}
+
+// Keeps the address exactly as typed (the provider's `formatted` string drops
+// house numbers and units); the provider's version is reference only.
+function buildResult(typedAddress, cand) {
+  const typedHasHouseNumber = /^\s*\d+/.test(typedAddress);
+  const streetLevelOnly = typedHasHouseNumber && !cand.houseMatch;
+  // Say WHY a stop is flagged so the driver (and I) can see what went wrong.
+  let reviewReason = null;
+  if (cand.cityMatch === false) reviewReason = 'matched a different town than the one typed';
+  else if (streetLevelOnly) reviewReason = 'house number not found, pin is on the street';
+  else if (cand.confidence < 80) reviewReason = `low map accuracy (${cand.confidence}%)`;
+  return {
+    address: typedAddress,
+    matchedAddress: cand.matchedAddress || null,
+    lat: cand.lat,
+    lng: cand.lng,
+    confidence: cand.confidence,
+    needsReview: Boolean(reviewReason),
+    reviewReason,
+    error: null
+  };
+}
+
+function distKm(aLat, aLng, bLat, bLng) {
+  const R = 6371;
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+
+// A Flex block stays inside one metro area. Candidates farther than this from
+// the route's centre are treated as the wrong town of the same name.
+const ROUTE_RADIUS_KM = 45;
+
+/**
+ * Bare city names are ambiguous (Hampden MA vs Hamden CT). Each stop has up to
+ * a few candidates; the right ones all sit close together, the wrong ones
+ * scatter. Finds the candidate that the most stops have a candidate near, uses
+ * it as the route centre, and gives every stop its best-scoring candidate
+ * within ROUTE_RADIUS_KM of that centre. Stops with nothing nearby keep their
+ * top match but are flagged for review.
+ *
+ * @param {Array} results geocodeAddress results (with .candidates)
+ * @returns {{ results: Array, center: {lat:number,lng:number}|null }}
+ */
+export function resolveGeocodeCluster(results) {
+  const pts = [];
+  results.forEach((r, idx) => {
+    const list = Array.isArray(r?.candidates) && r.candidates.length ? r.candidates : Number.isFinite(r?.lat) ? [{ lat: r.lat, lng: r.lng, confidence: r.confidence, score: 0 }] : [];
+    list.forEach((c) => pts.push({ idx, c }));
+  });
+  if (pts.length === 0) return { results, center: null };
+
+  let best = null;
+  for (const p of pts) {
+    const stopsNear = new Set();
+    let scoreSum = 0;
+    for (const q of pts) {
+      if (distKm(p.c.lat, p.c.lng, q.c.lat, q.c.lng) <= ROUTE_RADIUS_KM) {
+        if (!stopsNear.has(q.idx)) scoreSum += q.c.score || 0;
+        stopsNear.add(q.idx);
+      }
+    }
+    if (!best || stopsNear.size > best.n || (stopsNear.size === best.n && scoreSum > best.s)) {
+      best = { p, n: stopsNear.size, s: scoreSum };
+    }
+  }
+
+  // Refine the centre: average of each stop's best candidate near the seed.
+  const seed = best.p.c;
+  const near = [];
+  results.forEach((r, idx) => {
+    const list = pts.filter((q) => q.idx === idx && distKm(seed.lat, seed.lng, q.c.lat, q.c.lng) <= ROUTE_RADIUS_KM);
+    if (list.length) near.push(list.sort((a, b) => (b.c.score || 0) - (a.c.score || 0))[0].c);
+  });
+  const center = {
+    lat: near.reduce((s, c) => s + c.lat, 0) / near.length,
+    lng: near.reduce((s, c) => s + c.lng, 0) / near.length
+  };
+
+  const resolved = results.map((r) => {
+    if (!r || !Array.isArray(r.candidates) || r.candidates.length === 0) {
+      if (r && Number.isFinite(r.lat) && distKm(center.lat, center.lng, r.lat, r.lng) > ROUTE_RADIUS_KM) return { ...r, needsReview: true, farFromRoute: true, reviewReason: 'far from the rest of the route' };
+      return r;
+    }
+    const within = r.candidates
+      .filter((c) => distKm(center.lat, center.lng, c.lat, c.lng) <= ROUTE_RADIUS_KM)
+      .sort((a, b) => (b.score || 0) - (a.score || 0));
+    if (within.length === 0) return { ...r, needsReview: true, farFromRoute: true, reviewReason: 'far from the rest of the route' };
+    const chosen = within[0];
+    if (chosen.lat === r.lat && chosen.lng === r.lng) return r;
+    return { ...r, ...buildResult(r.address, chosen), candidates: r.candidates };
+  });
+  return { results: resolved, center };
+}
+
+/**
+ * For one added/edited stop: pick the candidate nearest a known point (the
+ * route centre). Returns the result unchanged when there is nothing better.
+ */
+export function pickCandidateNear(result, center) {
+  if (!result || !center || !Array.isArray(result.candidates) || result.candidates.length === 0) return result;
+  const within = result.candidates
+    .filter((c) => distKm(center.lat, center.lng, c.lat, c.lng) <= ROUTE_RADIUS_KM)
+    .sort((a, b) => (b.score || 0) - (a.score || 0));
+  if (within.length === 0) return { ...result, needsReview: true, farFromRoute: true, reviewReason: 'far from the rest of the route' };
+  const chosen = within[0];
+  if (chosen.lat === result.lat && chosen.lng === result.lng) return result;
+  return { ...result, ...buildResult(result.address, chosen), candidates: result.candidates };
+}
+
+/**
+ * Centre of a set of located stops (median, so one stray stop can't drag it).
+ */
+export function routeCenter(stops) {
+  const pts = (stops || []).filter((s) => Number.isFinite(s?.lat) && Number.isFinite(s?.lng));
+  if (pts.length === 0) return null;
+  const med = (arr) => {
+    const a = [...arr].sort((x, y) => x - y);
+    const m = Math.floor(a.length / 2);
+    return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
+  };
+  return { lat: med(pts.map((p) => p.lat)), lng: med(pts.map((p) => p.lng)) };
 }
 
 /**
@@ -229,37 +365,21 @@ export async function geocodeAddress(rawAddress, _unusedToken, options = {}) {
         return { ...fallback, error: 'No match found within the configured service area (CT/MA)' };
       }
 
-      const match = results[0];
-      const geometry = match.geometry;
-      if (!geometry || typeof geometry.lat !== 'number' || typeof geometry.lng !== 'number') {
-        return { ...fallback, error: 'Malformed geocode response' };
-      }
-
-      // OpenCage's confidence is 0-10 (10 = rooftop-accurate), unlike
-      // Mapbox's 0-1 relevance or Census's binary match/no-match. Scaled
-      // to this app's existing 0-100 confidence convention (used
-      // elsewhere for the "needs review" flag and UI display) so nothing
-      // downstream has to know which provider produced the number.
-      const rawConfidence = typeof match.confidence === 'number' ? match.confidence : 0;
-      const confidence = Math.round((rawConfidence / 10) * 100);
-
-      // Keep the address EXACTLY as the driver typed/scanned it for display.
-      // OpenCage's `formatted` string drops house numbers and units whenever
-      // it only matches the street (e.g. "Main Street, Hartford, CT"), which
-      // used to overwrite a corrected address with just street + city/state.
-      // The provider's version is kept separately for reference only.
-      const typedHasHouseNumber = /^\s*\d+/.test(trimmedAddress);
-      const matchedHouseNumber = Boolean(match.components && match.components.house_number);
-      const streetLevelOnly = typedHasHouseNumber && match.components && !matchedHouseNumber;
-      const result = {
-        address: trimmedAddress,
-        matchedAddress: match.formatted || null,
-        lat: geometry.lat,
-        lng: geometry.lng,
-        confidence,
-        needsReview: confidence < 80 || Boolean(streetLevelOnly),
-        error: null
-      };
+      // The typed city (text after the last comma) should appear in the matched
+      // place; a candidate in a different town scores lower.
+      const typedCity = hasLikelyCity(trimmedAddress) ? trimmedAddress.split(',').pop().trim().toLowerCase() : '';
+      const candidates = results
+        .filter((r) => r?.geometry && typeof r.geometry.lat === 'number' && typeof r.geometry.lng === 'number')
+        .slice(0, 6)
+        .map(toCandidate)
+        .map((c) => {
+          if (!typedCity || typedCity.length < 3) return c;
+          const inMatch = String(c.matchedAddress || '').toLowerCase().includes(typedCity);
+          return { ...c, cityMatch: inMatch, score: c.score + (inMatch ? 1.5 : -1) };
+        })
+        .sort((a, b) => b.score - a.score);
+      if (candidates.length === 0) return { ...fallback, error: 'Malformed geocode response' };
+      const result = { ...buildResult(trimmedAddress, candidates[0]), candidates };
       setCachedGeocode(trimmedAddress, result);
       return result;
     } catch (err) {

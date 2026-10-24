@@ -13,7 +13,7 @@ import AuthScreen from './components/AuthScreen';
 import ApartmentIntelEditor from './components/ApartmentIntelEditor';
 import BlockPayPrompt from './components/BlockPayPrompt';
 import DeadlinePrompt from './components/DeadlinePrompt';
-import { geocodeAddress, geocodeAddressBatch } from './utils/geocoder';
+import { geocodeAddress, geocodeAddressBatch, resolveGeocodeCluster, pickCandidateNear, routeCenter } from './utils/geocoder';
 import { watchDriverPosition, distanceMeters } from './utils/geolocation';
 import { parseDeliveryWindowEnd } from './utils/deliveryWindow';
 import { upsertLocationBatch, fetchLocationIntelligence, fetchApartmentIntelPreview } from './lib/locations';
@@ -71,6 +71,8 @@ function originForOptimize(pos) {
 export default function App() {
   const [session, setSession] = useState(undefined); // undefined = still checking
   const [stops, setStops] = useState([]);
+  const stopsRef = useRef([]);
+  stopsRef.current = stops;
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isProcessingRoute, setIsProcessingRoute] = useState(false);
   const [processingError, setProcessingError] = useState(null);
@@ -382,7 +384,7 @@ export default function App() {
       // from the old Mapbox-token signature, kept for compatibility; the
       // geocoding API key lives server-side only now (never sent to or
       // accepted from the client), so this is passed as null.
-      const geoResults = await geocodeAddressBatch(
+      const rawGeoResults = await geocodeAddressBatch(
         rawStops.map((s) => s.address),
         null,
         5,
@@ -405,6 +407,9 @@ export default function App() {
         }
       );
 
+      // Resolve ambiguous city names against the rest of the route.
+      const geoResults = resolveGeocodeCluster(rawGeoResults).results;
+
       let geocodedStops = rawStops.map((stop, idx) => {
         const geo = geoResults[idx];
         return {
@@ -415,6 +420,7 @@ export default function App() {
           lng: geo.lng,
           confidence: geo.confidence,
           needsReview: geo.needsReview || geo.lat === null,
+          reviewReason: geo.reviewReason || (geo.lat === null ? geo.error || 'address not found' : null),
           packageCount: stop.packageCount || 1,
           deliveryWindow: stop.deliveryWindow || null,
           deliveryWindowEnd: parseDeliveryWindowEnd(stop.deliveryWindow),
@@ -919,9 +925,11 @@ export default function App() {
 
       setIsGeocodingEdit(true);
       try {
-        const geo = await geocodeAddress(trimmed, null, {
+        const geoRaw = await geocodeAddress(trimmed, null, {
           proximity: driverPosition ? { lat: driverPosition.lat, lng: driverPosition.lng } : undefined
         });
+        // Pick the match that fits the rest of the route (same-named towns).
+        const geo = pickCandidateNear(geoRaw, routeCenter(stops.filter((s) => s.id !== stopId)));
 
         setStops((prev) =>
           prev.map((s) =>
@@ -933,6 +941,7 @@ export default function App() {
                   lng: geo.lng,
                   confidence: geo.confidence,
                   needsReview: geo.needsReview || geo.lat === null,
+                  reviewReason: geo.reviewReason || (geo.lat === null ? geo.error || 'address not found' : null),
                   // A manually-edited address points at a different place
                   // than whatever it was linked to before — the old
                   // locationId's learned stop-duration data belongs to the
@@ -973,9 +982,10 @@ export default function App() {
       try {
         let geo;
         try {
-          geo = await geocodeAddress(trimmed, null, {
+          const geoRaw = await geocodeAddress(trimmed, null, {
             proximity: driverPosition ? { lat: driverPosition.lat, lng: driverPosition.lng } : { lat: 41.7637, lng: -72.6851 }
           });
+          geo = pickCandidateNear(geoRaw, routeCenter(stopsRef.current));
         } catch (e) {
           geo = { address: trimmed, lat: null, lng: null, confidence: 0, needsReview: true };
         }
@@ -995,6 +1005,7 @@ export default function App() {
             lng: located ? geo.lng : null,
             confidence: geo.confidence,
             needsReview: geo.needsReview || !located,
+            reviewReason: geo.reviewReason || (!located ? 'address not found' : null),
             packageCount: Number.isInteger(packageCount) && packageCount > 0 ? packageCount : 1,
             deliveryWindow: null,
             deliveryWindowEnd: null,

@@ -1462,3 +1462,9 @@ It now works like this (`src/utils/driveCalibration.js`):
 - Misread pin digits ("82" for 32, "B8" for 38, "a0" for 40) are repaired from the neighbouring rows on the same screenshot; rows that can't be repaired are sent to the confirm screen to check.
 - Screenshots are no longer shrunk to 1600px before scanning (small digits blurred); only images over 2800px are reduced.
 - On the confirm screen, removing a stop moves every later stop down one number so the list stays in order; earlier numbers keep their Amazon number.
+
+## Map pins were landing in Connecticut
+- Cause: every address that had a city but no state got ", CT" appended (default region hint), so Springfield, Hampden and Wilbraham MA stops were looked up inside Connecticut and flagged low confidence. Old cached CT matches were also reused.
+- Fixes: no state is forced onto an address that already names a city. /api/geocode now returns up to 6 candidates. The app picks, for each stop, the candidate that fits the tightest cluster of the whole route (45 km), and prefers matches that contain the typed city. Added or edited stops are matched against the route's centre. The geocode cache was versioned (flexGeocodeCache.v2) so old wrong matches are dropped.
+- The list warning now says why a stop is flagged (different town matched, house number not found, low map accuracy, far from the rest of the route).
+- After deploying, re-import the route; routes saved before the fix keep their old pins.

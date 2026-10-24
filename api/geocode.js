@@ -158,6 +158,21 @@ export default async function handler(req, res) {
     return res.status(200).json({ results: [] });
   }
 
-  const winner = best();
-  return res.status(200).json({ results: [winner] });
+  // Winner first, then the other candidates (deduped by location, max 6) so the
+  // client can pick the one that fits the rest of the route when a bare city
+  // name is ambiguous (Hampden MA vs Hamden CT, Springfield in many states).
+  const ranked = [...candidates].sort((a, b) => scoreCandidate(b, houseNumber) - scoreCandidate(a, houseNumber));
+  const seen = new Set();
+  const results = [];
+  for (const c of ranked) {
+    const lat = c?.geometry?.lat;
+    const lng = c?.geometry?.lng;
+    if (typeof lat !== 'number' || typeof lng !== 'number') continue;
+    const key = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push({ ...c, score: scoreCandidate(c, houseNumber) });
+    if (results.length >= 6) break;
+  }
+  return res.status(200).json({ results });
 }
