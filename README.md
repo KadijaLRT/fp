@@ -1442,3 +1442,17 @@ It now works like this (`src/utils/driveCalibration.js`):
 - Text scans now run one at a time, the stuck engine is shut down in the background, and a 55s hard cap lets the batch move on to the AI read.
 - Each row shows its stage ("Reading text on this phone..." or "Checking with AI..."). A 150s per-screenshot cap marks it failed with a retry hint instead of hanging.
 - AI retries shortened (3 tries, 30s each).
+
+## Always run the newest version
+- The app reloads itself once when a new version takes over, and the upload screen shows a small "Build <date time>" stamp. If the stamp or the row labels ("Reading text on this phone...", "Checking with AI...") look old, close the app fully (swipe it away) and reopen it, or delete the Home Screen icon and add it again.
+
+## AI step no longer times out
+- vercel.json gives /api/ocr up to 60s (the default 10s was cutting slow AI reads off).
+- Server waits 25s per AI attempt (1 retry), the model is asked to skip slow "thinking" output (dropped automatically if the model rejects it), and the reply is capped at 3000 tokens.
+- Each row counts seconds while checking ("Checking with AI... 14s"). Client allows 58s per attempt, 2 attempts.
+
+## Scanning is now text-only, you confirm, the API only orders
+- Screenshots are read on the phone (no AI, no Groq calls). Nothing is sent to /api/ocr anymore (the file is still in the repo but unused).
+- After scanning, Continue opens a confirm screen with every merged stop. Each stop has an editable Stop # (the Amazon pin number), address, packages, window and notes. Duplicate or missing numbers are blocked, and removing a stop does not renumber the others.
+- Only after you confirm are addresses geocoded and the route ordered (/api/geocode, /api/optimize).
+- If a screenshot can't be read, the row says so; use "Or type stops in manually" or add the stops on the confirm screen.

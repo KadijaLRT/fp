@@ -28,8 +28,8 @@ const MAX_IMAGE_BYTES = 8 * 1024 * 1024; // 8MB — generous for a phone screens
 // working. Reduced here so the full worst case comfortably fits under
 // the client's timeout (see UPLOAD_TIMEOUT_MS in ItineraryUpload.jsx),
 // instead of the two budgets working against each other.
-const REQUEST_TIMEOUT_MS = 12000;
-const MAX_RETRIES = 2;
+const REQUEST_TIMEOUT_MS = 25000;
+const MAX_RETRIES = 1;
 
 function withTimeout(promise, ms) {
   let timeoutId;
@@ -93,6 +93,9 @@ function normalizeWindow(text) {
   return t;
 }
 
+// Turned off for good if the model rejects the setting (so a model change never breaks OCR).
+let noReasoning = true;
+
 async function callGroqWithRetry(imageBase64, hintText = '') {
   let lastError;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -145,7 +148,10 @@ Rules:
             }
           ],
           response_format: { type: 'json_object' },
-          temperature: 0.1
+          temperature: 0.1,
+          max_completion_tokens: 3000,
+          // Skip slow "thinking" output: this is plain reading, not reasoning.
+          ...(noReasoning ? { reasoning_effort: 'none' } : {})
         }),
         REQUEST_TIMEOUT_MS
       );
@@ -153,6 +159,11 @@ Rules:
     } catch (err) {
       lastError = err;
       const status = err?.status || err?.response?.status;
+      if (status === 400 && noReasoning && /reason/i.test(String(err?.message))) {
+        noReasoning = false;
+        attempt--; // retry immediately without the setting, not counted as a failure
+        continue;
+      }
       // Don't retry on client errors like bad auth or malformed request —
       // only retry on rate limits (429) and transient server/network errors.
       const retryable = status === 429 || status >= 500 || err.message === 'Groq request timed out';

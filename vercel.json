@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/ocr.js": {
+      "maxDuration": 60
+    },
+    "api/optimize.js": {
+      "maxDuration": 30
+    }
+  }
+}

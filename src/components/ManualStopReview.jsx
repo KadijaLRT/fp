@@ -32,11 +32,15 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
   };
 
   const addStop = () => {
-    setStops((prev) => [...prev, withKey(emptyStop(prev.length + 2))]);
+    setStops((prev) => {
+      const highest = prev.reduce((m, s) => (Number.isInteger(Number(s.stopNumber)) ? Math.max(m, Number(s.stopNumber)) : m), 1);
+      return [...prev, withKey(emptyStop(highest + 1))];
+    });
   };
 
+  // Removing a stop keeps every other stop's Amazon number as it is.
   const removeStop = (idx) => {
-    setStops((prev) => prev.filter((_, i) => i !== idx).map((s, i) => ({ ...s, stopNumber: i + 2 })));
+    setStops((prev) => prev.filter((_, i) => i !== idx));
   };
 
   const handleConfirm = () => {
@@ -53,7 +57,23 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
       const packageCount = Number.isFinite(parsedCount) && parsedCount > 0 ? parsedCount : 1;
       return { ...rest, address: (s.address || '').trim(), packageCount };
     });
-    const validStops = trimmed.filter((s) => s.address.length > 0);
+    const validStops = trimmed
+      .filter((s) => s.address.length > 0)
+      .map((s) => ({ ...s, stopNumber: parseInt(s.stopNumber, 10) }));
+
+    if (validStops.some((s) => !Number.isInteger(s.stopNumber) || s.stopNumber < 1)) {
+      setError('Every stop needs a stop number of 1 or higher.');
+      return;
+    }
+    const seenNums = new Set();
+    for (const s of validStops) {
+      if (seenNums.has(s.stopNumber)) {
+        setError(`Stop number ${s.stopNumber} is used twice. Change one of them.`);
+        return;
+      }
+      seenNums.add(s.stopNumber);
+    }
+    validStops.sort((x, y) => x.stopNumber - y.stopNumber);
 
     if (validStops.length === 0) {
       setError('Add at least one stop with an address before continuing.');
@@ -69,21 +89,31 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
   return (
     <div className="max-w-md mx-auto p-4">
       <div className="bg-amber-950/40 border-l-4 border-amber-600 p-3 rounded-r-md text-xs text-amber-200 mb-4">
-        <strong className="text-amber-100">Review before continuing:</strong> these stops weren't read by
-        the normal screenshot scanner, so please check each address is
-        correct before routing.
+        <strong className="text-amber-100">Confirm your stops:</strong> check each stop number and
+        address against your Flex app. Nothing is mapped or routed until you tap Continue.
       </div>
 
       <div className="space-y-3">
         {stops.map((stop, idx) => (
           <div key={stop._key} className="bg-neutral-900 rounded-xl border border-neutral-800 p-3">
             <div className="flex justify-between items-center mb-2">
-              <span className="text-xs font-bold text-neutral-500 uppercase">Stop {idx + 1}</span>
+              <label className="flex items-center gap-2 text-xs font-bold text-neutral-500 uppercase">
+                Stop #
+                <input
+                  type="number"
+                  min="1"
+                  inputMode="numeric"
+                  value={stop.stopNumber ?? ''}
+                  onChange={(e) => updateStop(idx, 'stopNumber', e.target.value)}
+                  aria-label={`Stop number for row ${idx + 1}`}
+                  className="w-16 h-9 px-2 rounded-md bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                />
+              </label>
               {stops.length > 1 && (
                 <button
                   onClick={() => removeStop(idx)}
                   className="text-xs text-red-400 font-semibold px-2 py-1 min-h-[36px]"
-                  aria-label={`Remove stop ${idx + 1}`}
+                  aria-label={`Remove row ${idx + 1}`}
                 >
                   Remove
                 </button>

@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import ManualStopReview from './ManualStopReview';
 import { parseRawOcrText, emptyStop } from '../utils/ocrTextParser';
-import { scanTextFromImage, terminateTextScanWorker, reconcileStops, cleanTextScanStops } from '../utils/textScan';
+import { scanTextFromImage, terminateTextScanWorker, cleanTextScanStops } from '../utils/textScan';
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB
 const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif'];
@@ -13,7 +13,7 @@ const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'i
 // still correctly working through its own retry logic. Raised to
 // comfortably exceed the server's new worst case (~37.5s at its reduced
 // REQUEST_TIMEOUT_MS) with real margin for network transit on top.
-const UPLOAD_TIMEOUT_MS = 30000;
+const UPLOAD_TIMEOUT_MS = 58000;
 // A single Flex itinerary screenshot typically shows ~15-20 stops before
 // scrolling, so a 55-stop route realistically needs 3-4 images. Processing
 // them with limited concurrency (not all at once) keeps this comfortably
@@ -109,74 +109,11 @@ async function convertToBase64(file) {
 }
 
 /**
- * Runs Groq OCR on a single image file. Never throws — always resolves to
- * { stops, error } so a batch of these can't be taken down by one bad
- * image, mirroring the geocodeAddressBatch/upsertLocationBatch pattern
- * used elsewhere in the app.
- */
-async function ocrSingleFile(file, hintText = '', preparedImage = null) {
-  try {
-    const base64Image = preparedImage || (await convertToBase64(file));
-    // Busy/rate-limited responses (429, 5xx, timeouts) are retried with growing
-    // waits instead of failing the screenshot: later screenshots in a big
-    // batch used to fail here, which looked like "only a few scanned".
-    const waits = [0, 4000, 10000];
-    let response;
-    let result;
-    let lastErr = null;
-    for (let attempt = 0; attempt < waits.length; attempt++) {
-      if (waits[attempt]) await new Promise((r) => setTimeout(r, waits[attempt]));
-      try {
-        response = await withTimeout(
-          fetch('/api/ocr', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ imageBase64: base64Image, hintText: hintText || undefined })
-          }),
-          UPLOAD_TIMEOUT_MS
-        );
-      } catch (netErr) {
-        lastErr = netErr;
-        continue; // network hiccup or timeout: try again
-      }
-      if (response.status === 429 || response.status >= 500) {
-        lastErr = new Error('The scanner is busy.');
-        continue;
-      }
-      try {
-        result = await response.json();
-      } catch {
-        throw new Error('Server sent back an unreadable response.');
-      }
-      lastErr = null;
-      break;
-    }
-    if (lastErr || !response || !result) {
-      throw new Error(`${lastErr?.message || 'Scan failed'} Tap "Retry failed screenshots" in a moment.`);
-    }
-
-    if (!response.ok || !result.success) {
-      throw new Error(result?.error || 'Failed to parse screenshot.');
-    }
-    if (!Array.isArray(result.data?.stops) || result.data.stops.length === 0) {
-      throw new Error('No stops were detected in this screenshot.');
-    }
-
-    return { stops: result.data.stops, error: null };
-  } catch (err) {
-    return { stops: null, error: err.message || 'Something went wrong processing this screenshot.' };
-  }
-}
-
-/**
- * Text scan first (on device, free, no rate limit), then the AI read confirms
- * and maps the stops using that text as a hint. Stops both agree on are marked
- * confirmed. If the AI read fails, the text-scan draft is kept for review
- * instead of failing the whole screenshot.
+ * Reads one screenshot with the on-device text scan (free, no API). The
+ * driver confirms every stop on the review screen before routing.
  */
 async function processScreenshot(file, onStage = () => {}) {
-  // Downscale once (1600px JPEG) and reuse for both the text scan and the AI
-  // read: scanning a full-size phone screenshot is slow enough to look stuck.
+  // Downscale once (1600px JPEG): scanning a full-size phone screenshot is slow.
   let prepared = null;
   try {
     prepared = await convertToBase64(file);
@@ -186,39 +123,21 @@ async function processScreenshot(file, onStage = () => {}) {
   onStage('Reading text on this phone...');
   const text = await scanTextFromImage(prepared || file);
 
-  // Save API usage: when the on-device text scan passes strict format checks
-  // (pin numbers, house numbers, city lines, rising order), the AI read is skipped.
-  const clean = cleanTextScanStops(text);
-  if (clean) {
+  // No AI read: the text scan gives a draft and the driver confirms every
+  // address before anything is geocoded or routed.
+  const cleanStops = cleanTextScanStops(text);
+  const draftStops = cleanStops || (text ? parseRawOcrText(text).filter((st) => st.address) : []);
+  if (draftStops.length === 0) {
     return {
-      stops: clean.map((st) => ({ ...st, scanConfirmed: true })),
-      error: null,
-      note: 'text scan only, no AI used'
+      stops: null,
+      error: 'No stops could be read from this screenshot. Try a sharper screenshot, or add its stops by hand with "Or type stops in manually".'
     };
   }
-
-  onStage('Checking with AI...');
-  const ai = await ocrSingleFile(file, text || '', prepared);
-
-  if (ai.stops) {
-    const { stops, confirmedCount, extraCount } = reconcileStops(ai.stops, text);
-    const differ = stops.length - extraCount - confirmedCount;
-    return {
-      stops,
-      error: null,
-      note: text ? `${confirmedCount} confirmed${differ > 0 ? `, ${differ} differ` : ''}${extraCount ? `, ${extraCount} extra` : ''}` : 'AI read only'
-    };
-  }
-
-  const draft = text ? parseRawOcrText(text).filter((st) => st.address) : [];
-  if (draft.length > 0) {
-    return {
-      stops: draft.map((st) => ({ ...st, scanConfirmed: false, needsManualReview: true })),
-      error: null,
-      note: 'text scan only, check addresses'
-    };
-  }
-  return { stops: null, error: ai.error, note: null };
+  return {
+    stops: draftStops.map((st) => ({ ...st, scanConfirmed: !!cleanStops, needsManualReview: !cleanStops })),
+    error: null,
+    note: 'text read, you confirm next'
+  };
 }
 
 let nextBatchItemId = 1;
@@ -236,6 +155,8 @@ export default function ItineraryUpload({ onRouteImported }) {
   // realistically needs several images, since a single Flex screenshot
   // only shows ~15-20 stops before scrolling.
   const [batch, setBatch] = useState([]);
+  // Set while the final confirm screen (all merged stops) is showing.
+  const finalReviewRef = useRef(false);
   const [batchRunning, setBatchRunning] = useState(false);
 
   const updateBatchItem = (id, patch) => {
@@ -276,7 +197,7 @@ export default function ItineraryUpload({ onRouteImported }) {
         // Last-resort cap so one row can never hang the whole batch.
         const { stops, error: ocrError, note } = await withTimeout(
           processScreenshot(item.file, (stage) => updateBatchItem(item.id, { stage })),
-          150000
+          170000
         ).catch(() => ({ stops: null, error: 'This screenshot took too long. Tap "Retry failed screenshots".' }));
         if (stops) {
           updateBatchItem(item.id, { status: 'success', stops, error: null, note });
@@ -432,64 +353,18 @@ export default function ItineraryUpload({ onRouteImported }) {
       return;
     }
 
-    onRouteImported(mergedStops);
-  };
-
-  // Fallback path 1: when a screenshot's primary Groq vision OCR fails,
-  // run a client-side Tesseract.js pass on that same image instead of
-  // losing it from the batch entirely. Tesseract's raw text output is
-  // heuristically parsed into candidate stops, then shown for mandatory
-  // review/edit — this path is never trusted the way Groq's structured
-  // JSON output is.
-  const handleTryTextScan = async (failedItem) => {
-    lastFailedFileRef.current = failedItem;
-    setFallbackMode('scanning');
+    // Every address is confirmed by the driver before anything is geocoded
+    // or routed; the API is only used afterwards to place and order stops.
+    finalReviewRef.current = true;
+    lastFailedFileRef.current = null;
+    setReviewStops(mergedStops.map(({ fromReview, scanConfirmed, needsManualReview, ...st }) => {
+      void fromReview;
+      void scanConfirmed;
+      void needsManualReview;
+      return st;
+    }));
+    setFallbackMode('review');
     setError(null);
-
-    try {
-      // Dynamically imported: Tesseract.js (and its wasm/worker assets) is
-      // large, and most sessions never need it since the primary Groq OCR
-      // path usually succeeds — no reason to pay that bundle cost upfront.
-      //
-      // Bug fix: `await import('tesseract.js')` returns the ES module
-      // namespace object, not the package's default export — Tesseract.js
-      // ships as CJS with `recognize`/`createWorker`/etc. attached to
-      // `module.exports`, which lands on `.default` here, not on the
-      // namespace object directly. The previous code called
-      // `Tesseract.recognize(...)` on the namespace object, which is
-      // `undefined` there — every text-scan attempt threw a TypeError
-      // immediately and was silently swallowed by the catch block below,
-      // always reporting "text scan also failed" regardless of the image.
-      const { createWorker } = await import('tesseract.js');
-      // Self-hosted engine + language data (public/tesseract/). The
-      // library's defaults download the worker and wasm core from jsdelivr
-      // and a ~10MB language file from tessdata.projectnaptha.com at scan
-      // time, so any CDN hiccup, slow cell connection, or iOS PWA
-      // network restriction failed the whole fallback with no useful
-      // message. Absolute URLs are required because the worker is started
-      // from a blob, where relative paths don't resolve.
-      const base = `${window.location.origin}/tesseract`;
-      const worker = await createWorker('eng', 1, {
-        workerPath: `${base}/worker.min.js`,
-        corePath: base,
-        langPath: base,
-        gzip: true
-      });
-      let data;
-      try {
-        ({ data } = await worker.recognize(failedItem.file));
-      } finally {
-        await worker.terminate().catch(() => {});
-      }
-      const parsedStops = parseRawOcrText(data?.text);
-      setReviewStops(parsedStops);
-      setFallbackMode('review');
-    } catch (err) {
-      console.error('Client-side text scan failed:', err);
-      const detail = err?.message ? ` (${String(err.message).slice(0, 120)})` : '';
-      setError(`Text scan also failed for that screenshot${detail}. You can enter its stops manually, or remove it from the batch and continue with the rest.`);
-      setFallbackMode('idle');
-    }
   };
 
   // Fallback path 2: skip scanning entirely and let the driver type a
@@ -505,6 +380,16 @@ export default function ItineraryUpload({ onRouteImported }) {
   // with the manually-recovered stops, so it merges into the batch like
   // any other successful screenshot instead of requiring a separate flow.
   const handleReviewConfirm = (confirmedStops) => {
+    if (finalReviewRef.current) {
+      finalReviewRef.current = false;
+      setFallbackMode('idle');
+      setReviewStops(null);
+      onRouteImported(confirmedStops.map((st, i) => ({
+        ...st,
+        stopNumber: Number.isInteger(st.stopNumber) && st.stopNumber > 0 ? st.stopNumber : i + 2
+      })));
+      return;
+    }
     const failedItem = lastFailedFileRef.current;
     setFallbackMode('idle');
     setReviewStops(null);
@@ -524,6 +409,7 @@ export default function ItineraryUpload({ onRouteImported }) {
   };
 
   const handleReviewCancel = () => {
+    finalReviewRef.current = false;
     setFallbackMode('idle');
     setReviewStops(null);
     lastFailedFileRef.current = null;
@@ -605,6 +491,7 @@ export default function ItineraryUpload({ onRouteImported }) {
         <p className="text-[11px] text-neutral-600 mt-2">
           Select several at once from your photo library, or add more one batch at a time.
         </p>
+        <p className="text-[10px] text-neutral-700 mt-1">Build {typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : 'dev'}</p>
 
         {fallbackMode === 'scanning' && (
           <p className="mt-3 text-xs text-amber-500 font-semibold">Scanning text locally, this can take a moment…</p>
@@ -657,12 +544,6 @@ export default function ItineraryUpload({ onRouteImported }) {
                         <p role="alert" className="text-red-400 mt-1 mb-1.5">{item.error}</p>
                       )}
                       <div className="flex items-center gap-2">
-                        <button
-                          onClick={() => handleTryTextScan(item)}
-                          className="text-neutral-500 underline text-[11px]"
-                        >
-                          Text scan
-                        </button>
                         <button
                           onClick={() => handleManualEntry(item)}
                           className="text-neutral-500 underline text-[11px]"
