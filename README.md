@@ -1430,3 +1430,9 @@ It now works like this (`src/utils/driveCalibration.js`):
 - /api/geocode asks OpenCage for 5 candidates, picks the one matching the typed house number, and asks Mapbox for a second opinion when the best match is not rooftop-accurate or the house number does not match.
 - Screenshot scanning retries busy/rate-limited responses with growing waits (and runs 2 at a time) instead of failing later screenshots in a batch.
 - The map's dashed line is still drawn straight between pins (indicative only); it is not used for any time estimate.
+
+- Fix: a text-scan stop with the same pin number as an AI stop is no longer added as an extra stop (it doubled stop counts when the two reads worded an address differently).
+
+## Fewer API calls, and no more getting stuck
+- The on-device text scan runs first. If its result passes strict checks (pin number, house number, city line, rising order on every stop; cut-off edge rows are dropped), the AI call is skipped entirely ("text scan only, no AI used"). Otherwise the AI confirms using the text as a hint.
+- The scanner no longer hangs the batch: screenshots are downscaled once before scanning, engine start has a 30s limit, each scan 25s, a timed-out engine is replaced, and after repeated timeouts text scanning is switched off for the batch so the AI read takes over.

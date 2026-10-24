@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import ManualStopReview from './ManualStopReview';
 import { parseRawOcrText, emptyStop } from '../utils/ocrTextParser';
-import { scanTextFromImage, terminateTextScanWorker, reconcileStops } from '../utils/textScan';
+import { scanTextFromImage, terminateTextScanWorker, reconcileStops, cleanTextScanStops } from '../utils/textScan';
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB
 const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif'];
@@ -114,9 +114,9 @@ async function convertToBase64(file) {
  * image, mirroring the geocodeAddressBatch/upsertLocationBatch pattern
  * used elsewhere in the app.
  */
-async function ocrSingleFile(file, hintText = '') {
+async function ocrSingleFile(file, hintText = '', preparedImage = null) {
   try {
-    const base64Image = await convertToBase64(file);
+    const base64Image = preparedImage || (await convertToBase64(file));
     // Busy/rate-limited responses (429, 5xx, timeouts) are retried with growing
     // waits instead of failing the screenshot: later screenshots in a big
     // batch used to fail here, which looked like "only a few scanned".
@@ -175,12 +175,37 @@ async function ocrSingleFile(file, hintText = '') {
  * instead of failing the whole screenshot.
  */
 async function processScreenshot(file) {
-  const text = await scanTextFromImage(file);
-  const ai = await ocrSingleFile(file, text || '');
+  // Downscale once (1600px JPEG) and reuse for both the text scan and the AI
+  // read: scanning a full-size phone screenshot is slow enough to look stuck.
+  let prepared = null;
+  try {
+    prepared = await convertToBase64(file);
+  } catch {
+    prepared = null;
+  }
+  const text = await scanTextFromImage(prepared || file);
+
+  // Save API usage: when the on-device text scan passes strict format checks
+  // (pin numbers, house numbers, city lines, rising order), the AI read is skipped.
+  const clean = cleanTextScanStops(text);
+  if (clean) {
+    return {
+      stops: clean.map((st) => ({ ...st, scanConfirmed: true })),
+      error: null,
+      note: 'text scan only, no AI used'
+    };
+  }
+
+  const ai = await ocrSingleFile(file, text || '', prepared);
 
   if (ai.stops) {
     const { stops, confirmedCount, extraCount } = reconcileStops(ai.stops, text);
-    return { stops, error: null, note: text ? `${confirmedCount} confirmed${extraCount ? `, ${extraCount} to check` : ''}` : 'AI read only' };
+    const differ = stops.length - extraCount - confirmedCount;
+    return {
+      stops,
+      error: null,
+      note: text ? `${confirmedCount} confirmed${differ > 0 ? `, ${differ} differ` : ''}${extraCount ? `, ${extraCount} extra` : ''}` : 'AI read only'
+    };
   }
 
   const draft = text ? parseRawOcrText(text).filter((st) => st.address) : [];

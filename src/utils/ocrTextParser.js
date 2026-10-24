@@ -197,6 +197,8 @@ export function parseRawOcrText(rawText) {
 
     return {
       stopNumber: amazonNumber ?? idx + 2, // stop 1 is the pickup station
+      numberFromPin: amazonNumber !== null,
+      cityFound: Boolean(cityLine),
       address: cityLine ? `${streetPart}, ${cityLine}` : streetPart,
       packageCount: packageMatch ? Math.max(1, parseInt(packageMatch[1], 10)) : 1,
       deliveryWindow: windowMatch ? normalizeDeliveryWindow(windowMatch[0]) : null,
