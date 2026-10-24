@@ -13,7 +13,8 @@ let workerPromise = null;
 let disabled = false;
 let timeouts = 0;
 const START_TIMEOUT_MS = 30000;
-const SCAN_TIMEOUT_MS = 25000;
+const SCAN_TIMEOUT_MS = 20000;
+const HARD_CAP_MS = 55000;
 
 function withDeadline(promise, ms, label) {
   let id;
@@ -47,38 +48,52 @@ async function getWorker() {
   return workerPromise;
 }
 
+// Never wait on terminate(): a stuck engine never answers, and waiting on it
+// is exactly what froze the batch. Shut it down in the background and move on.
+function killInBackground(p) {
+  if (!p) return;
+  Promise.resolve(p)
+    .then((w) => w.terminate())
+    .catch(() => {});
+}
+
 export async function terminateTextScanWorker() {
   const p = workerPromise;
   workerPromise = null;
   // A new batch gets a fresh chance.
   disabled = false;
   timeouts = 0;
-  if (!p) return;
-  try {
-    const w = await p;
-    await w.terminate();
-  } catch {
-    /* ignore */
-  }
+  scanChain = Promise.resolve();
+  killInBackground(p);
 }
 
-async function resetWorker() {
+function resetWorker() {
   const p = workerPromise;
   workerPromise = null;
-  if (!p) return;
-  try {
-    const w = await p;
-    await w.terminate();
-  } catch {
-    /* ignore */
-  }
+  killInBackground(p);
 }
+
+// Scans run one at a time so a deadline measures the scan itself, not time
+// spent queued behind another screenshot.
+let scanChain = Promise.resolve();
 
 /**
  * @param {string|File|Blob} image a (downscaled) data URL is best: full-size phone screenshots are slow to scan
  * @returns {Promise<string|null>} raw text, or null if the scan failed, timed out or is switched off
  */
-export async function scanTextFromImage(image) {
+export function scanTextFromImage(image) {
+  const run = scanChain.then(() => scanOne(image), () => scanOne(image));
+  scanChain = run.then(() => undefined, () => undefined);
+  // Hard cap including queue time: after this the caller moves on regardless.
+  return withDeadline(run, HARD_CAP_MS, 'Text scan gave up').catch(() => {
+    disabled = true;
+    resetWorker();
+    scanChain = Promise.resolve();
+    return null;
+  });
+}
+
+async function scanOne(image) {
   if (disabled) return null;
   try {
     const worker = await getWorker();
@@ -94,7 +109,7 @@ export async function scanTextFromImage(image) {
       // A scan that timed out leaves the engine busy: replace it so the next
       // screenshot is not queued behind it.
       timeouts++;
-      await resetWorker();
+      resetWorker();
       if (timeouts >= 2) disabled = true;
     }
     return null;

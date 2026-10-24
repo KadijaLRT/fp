@@ -1436,3 +1436,9 @@ It now works like this (`src/utils/driveCalibration.js`):
 ## Fewer API calls, and no more getting stuck
 - The on-device text scan runs first. If its result passes strict checks (pin number, house number, city line, rising order on every stop; cut-off edge rows are dropped), the AI call is skipped entirely ("text scan only, no AI used"). Otherwise the AI confirms using the text as a hint.
 - The scanner no longer hangs the batch: screenshots are downscaled once before scanning, engine start has a 30s limit, each scan 25s, a timed-out engine is replaced, and after repeated timeouts text scanning is switched off for the batch so the AI read takes over.
+
+## Batch scan no longer freezes
+- Cause: screenshots shared one text-reading engine, and a timed-out engine was awaited while shutting down, which never returned.
+- Text scans now run one at a time, the stuck engine is shut down in the background, and a 55s hard cap lets the batch move on to the AI read.
+- Each row shows its stage ("Reading text on this phone..." or "Checking with AI..."). A 150s per-screenshot cap marks it failed with a retry hint instead of hanging.
+- AI retries shortened (3 tries, 30s each).

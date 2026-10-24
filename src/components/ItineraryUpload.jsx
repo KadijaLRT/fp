@@ -13,7 +13,7 @@ const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'i
 // still correctly working through its own retry logic. Raised to
 // comfortably exceed the server's new worst case (~37.5s at its reduced
 // REQUEST_TIMEOUT_MS) with real margin for network transit on top.
-const UPLOAD_TIMEOUT_MS = 45000;
+const UPLOAD_TIMEOUT_MS = 30000;
 // A single Flex itinerary screenshot typically shows ~15-20 stops before
 // scrolling, so a 55-stop route realistically needs 3-4 images. Processing
 // them with limited concurrency (not all at once) keeps this comfortably
@@ -120,7 +120,7 @@ async function ocrSingleFile(file, hintText = '', preparedImage = null) {
     // Busy/rate-limited responses (429, 5xx, timeouts) are retried with growing
     // waits instead of failing the screenshot: later screenshots in a big
     // batch used to fail here, which looked like "only a few scanned".
-    const waits = [0, 5000, 12000, 25000];
+    const waits = [0, 4000, 10000];
     let response;
     let result;
     let lastErr = null;
@@ -174,7 +174,7 @@ async function ocrSingleFile(file, hintText = '', preparedImage = null) {
  * confirmed. If the AI read fails, the text-scan draft is kept for review
  * instead of failing the whole screenshot.
  */
-async function processScreenshot(file) {
+async function processScreenshot(file, onStage = () => {}) {
   // Downscale once (1600px JPEG) and reuse for both the text scan and the AI
   // read: scanning a full-size phone screenshot is slow enough to look stuck.
   let prepared = null;
@@ -183,6 +183,7 @@ async function processScreenshot(file) {
   } catch {
     prepared = null;
   }
+  onStage('Reading text on this phone...');
   const text = await scanTextFromImage(prepared || file);
 
   // Save API usage: when the on-device text scan passes strict format checks
@@ -196,6 +197,7 @@ async function processScreenshot(file) {
     };
   }
 
+  onStage('Checking with AI...');
   const ai = await ocrSingleFile(file, text || '', prepared);
 
   if (ai.stops) {
@@ -271,7 +273,11 @@ export default function ItineraryUpload({ onRouteImported }) {
         isFirst = false;
 
         updateBatchItem(item.id, { status: 'processing' });
-        const { stops, error: ocrError, note } = await processScreenshot(item.file);
+        // Last-resort cap so one row can never hang the whole batch.
+        const { stops, error: ocrError, note } = await withTimeout(
+          processScreenshot(item.file, (stage) => updateBatchItem(item.id, { stage })),
+          150000
+        ).catch(() => ({ stops: null, error: 'This screenshot took too long. Tap "Retry failed screenshots".' }));
         if (stops) {
           updateBatchItem(item.id, { status: 'success', stops, error: null, note });
         } else {
@@ -635,7 +641,7 @@ export default function ItineraryUpload({ onRouteImported }) {
                     )}
                     {(item.status === 'pending' || item.status === 'processing') && (
                       <span className="text-neutral-500 ml-2 whitespace-nowrap">
-                        ⏳ {item.status === 'processing' ? 'Reading text, then checking…' : 'Queued'}
+                        ⏳ {item.status === 'processing' ? (item.stage || 'Starting...') : 'Queued'}
                       </span>
                     )}
                   </div>
