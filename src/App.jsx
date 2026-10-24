@@ -5,7 +5,7 @@ import ActiveStopCard from './components/ActiveStopCard';
 import StopListView from './components/StopListView';
 import BlockTimeBanner from './components/BlockTimeBanner';
 import RouteNoticeModal from './components/RouteNoticeModal';
-import { compareToAmazonOrder, formatDuration } from './utils/etaEstimate';
+import { compareToAmazonOrder, formatDuration, setRoadMatrix, clearRoadMatrix, getRoutingSource } from './utils/etaEstimate';
 import { parseDeadlineToday } from './utils/deadlineProjection';
 import { logCompletion, commitRouteLegs, getCalibration, estimateSavings, formatRangeMinutes } from './utils/driveCalibration';
 import RouteMapView from './components/RouteMapView';
@@ -369,6 +369,7 @@ export default function App() {
 
   // --- Route import: geocode + optimize ----------------------------------
   const handleRouteImported = useCallback(async (rawStops) => {
+    clearRoadMatrix(); // road times belong to one route
     setIsProcessingRoute(true);
     setProcessingError(null);
     setRouteExplanation(null);
@@ -523,6 +524,8 @@ export default function App() {
           const result = await response.json();
 
           if (response.ok && result.success) {
+            // Register real road times BEFORE any comparison with Amazon's order.
+            setRoadMatrix(result.matrix, result.routingSource);
             const unresolvedStops = geocodedStops.filter((s) => !Number.isFinite(s.lat) || !Number.isFinite(s.lng));
             let optimizedList = result.optimizedStops;
             estimatedDrivingSeconds = typeof result.estimatedDrivingSeconds === 'number' ? result.estimatedDrivingSeconds : null;
@@ -786,6 +789,7 @@ export default function App() {
             completionMessage += `\n\nFinal pace: $${finalRate.toFixed(2)}/hr ($${(blockPayCents / 100).toFixed(2)} in ${(actualDurationSeconds / 3600).toFixed(1)}h)`;
           }
         }
+        clearRoadMatrix();
         lastDeliveredAtRef.current = null;
         endPromptDismissedRef.current = false;
         setEndPrompt(null);
@@ -1034,20 +1038,21 @@ export default function App() {
   // derive from stops[currentIndex], and the card's stop timer resets when
   // the stop's id changes, so the new current stop starts a fresh timer.
   // The current stop can't move "up" past completed stops.
-  const handleReorderStop = useCallback(
-    (stopId, direction) => {
+  // Drag and drop: move a not-yet-delivered stop to another position among the
+  // remaining stops. Delivered stops never move.
+  const handleMoveStop = useCallback(
+    (stopId, toIdx) => {
       setStops((prev) => {
-        const idx = prev.findIndex((s) => s.id === stopId);
-        if (idx === -1 || idx < currentIndex) return prev;
-
-        const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
-        if (targetIdx < currentIndex || targetIdx >= prev.length) return prev;
-
+        const from = prev.findIndex((s) => s.id === stopId);
+        if (from === -1 || from < currentIndex) return prev;
+        const to = Math.min(Math.max(toIdx, currentIndex), prev.length - 1);
+        if (to === from) return prev;
         const next = [...prev];
-        [next[idx], next[targetIdx]] = [next[targetIdx], next[idx]];
+        const [moved] = next.splice(from, 1);
+        next.splice(to, 0, moved);
         return next;
       });
-      setRouteExplanation(null); // the route's explanation no longer describes the actual order
+      setRouteExplanation(null);
     },
     [currentIndex]
   );
@@ -1088,6 +1093,7 @@ export default function App() {
           computeOptimizeTimeoutMs(routableRemaining.length)
         );
         const result = await response.json();
+        if (response.ok && result.success) setRoadMatrix(result.matrix, result.routingSource);
         if (response.ok && result.success) {
           reordered = result.optimizedStops;
         } else {
@@ -1150,6 +1156,7 @@ export default function App() {
         actualDurationSeconds: Math.max(0, (endedAtMs - routeStartedAtMs) / 1000)
       });
     }
+    clearRoadMatrix();
     lastDeliveredAtRef.current = null;
     endPromptDismissedRef.current = false;
     setEndPrompt(null);
@@ -1345,7 +1352,7 @@ export default function App() {
                 onStartEdit={handleStartEditStop}
                 onCancelEdit={handleCancelEditStop}
                 onSaveEdit={handleSaveEditStop}
-                onReorder={handleReorderStop}
+                onMoveStop={handleMoveStop}
                 onMarkDelivered={handleMarkDeliveredFromList}
                 onAddStop={handleAddStop}
               />

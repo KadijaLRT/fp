@@ -1,4 +1,4 @@
-import { legSeconds } from './etaEstimate.js';
+import { legSeconds, getRoutingSource } from './etaEstimate.js';
 
 /**
  * Learns how the app's modeled driving time compares with how long the
@@ -26,6 +26,10 @@ const MIN_LEGS_TO_CALIBRATE = 20;
 // Before any data: one real report (the model said ~71 min saved; the
 // driver judged the real saving at roughly 20 to 30 min) implies ~0.35.
 const PRIOR_K = 0.35;
+// With real road times the model no longer exaggerates drive time the way
+// straight-line estimates did, so the starting guess is much closer to 1.
+// This value is an assumption until the app has learned from real legs.
+const PRIOR_K_ROAD = 0.8;
 const PRIOR_SPREAD = [0.6, 1.4];
 const CALIBRATED_SPREAD = [0.75, 1.25];
 const OPTIMIZER_CAUTION = 0.75;
@@ -105,9 +109,10 @@ export function fitCalibration(legs) {
  * @param {{k:number,legsUsed:number}|null} calibration
  * @returns {{ lowSeconds:number, highSeconds:number, calibrated:boolean, legsUsed:number }}
  */
-export function estimateSavings(modelSavedSeconds, calibration) {
+export function estimateSavings(modelSavedSeconds, calibration, source = getRoutingSource()) {
   const calibrated = !!calibration;
-  const k = calibrated ? calibration.k * OPTIMIZER_CAUTION : PRIOR_K;
+  const caution = source === 'road' ? 0.9 : OPTIMIZER_CAUTION;
+  const k = calibrated ? calibration.k * caution : source === 'road' ? PRIOR_K_ROAD : PRIOR_K;
   const [lo, hi] = calibrated ? CALIBRATED_SPREAD : PRIOR_SPREAD;
   const mid = modelSavedSeconds * k;
   const a = mid * lo;
@@ -131,8 +136,9 @@ export function formatRangeMinutes(lowSeconds, highSeconds) {
 
 // ---- storage-backed helpers ----
 
-export function getCalibration() {
-  return fitCalibration(safeGet(LEGS_KEY) || []);
+export function getCalibration(source = getRoutingSource()) {
+  // Only legs measured against the same kind of model are comparable.
+  return fitCalibration((safeGet(LEGS_KEY) || []).filter((l) => (l.src || 'estimate') === source));
 }
 
 /** Records one "delivered" tap. Entries are tied to a route by its start time. */
@@ -161,7 +167,7 @@ export function commitRouteLegs(routeStartedAtMs) {
     if (![prev.lat, prev.lng, cur.lat, cur.lng].every((v) => typeof v === 'number')) continue;
     const L = (cur.atMs - prev.atMs) / 1000;
     if (L < 20 || L > 1800) continue;
-    legs.push({ d: legSeconds(prev, cur), L });
+    legs.push({ d: legSeconds(prev, cur), L, src: getRoutingSource() });
   }
   const history = safeGet(LEGS_KEY) || [];
   safeSet(LEGS_KEY, [...history, ...legs].slice(-MAX_LEGS));

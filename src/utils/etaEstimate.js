@@ -14,8 +14,67 @@ const UNKNOWN_LEG_SECONDS = 120;
 // Completed stops needed before the driver's own average replaces defaults.
 const MIN_STOPS_FOR_CALIBRATION = 2;
 
+// Real road driving times from /api/optimize (Mapbox Matrix), keyed by stop id
+// pair. When a pair is present it is used everywhere (time-saved comparison,
+// remaining-time estimate, calibration legs) instead of the straight-line
+// model, so Amazon's order and the optimized order are priced the same way.
+const ROAD_KEY = 'flexpulse.roadMatrix.v1';
+let roadPairs = new Map();
+let roadSource = 'estimate';
+
+try {
+  const saved = JSON.parse(window.localStorage.getItem(ROAD_KEY) || 'null');
+  if (saved && Array.isArray(saved.pairs)) {
+    roadPairs = new Map(saved.pairs);
+    roadSource = saved.source === 'road' ? 'road' : 'estimate';
+  }
+} catch {
+  /* no storage: road times just aren't remembered across refreshes */
+}
+
+function persistRoad() {
+  try {
+    window.localStorage.setItem(ROAD_KEY, JSON.stringify({ source: roadSource, pairs: [...roadPairs.entries()] }));
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Merge a matrix from /api/optimize ({ids, seconds}) into the registry. */
+export function setRoadMatrix(matrix, source) {
+  if (!matrix || !Array.isArray(matrix.ids) || !Array.isArray(matrix.seconds)) return;
+  if (source !== 'road') return; // mixed/estimate matrices are not trusted as road time
+  matrix.ids.forEach((a, i) => {
+    matrix.ids.forEach((b, j) => {
+      const v = matrix.seconds[i]?.[j];
+      if (i !== j && Number.isFinite(v)) roadPairs.set(`${a}|${b}`, v);
+    });
+  });
+  roadSource = 'road';
+  persistRoad();
+}
+
+export function clearRoadMatrix() {
+  roadPairs = new Map();
+  roadSource = 'estimate';
+  try {
+    window.localStorage.removeItem(ROAD_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 'road' when real road times are loaded for this route, else 'estimate'. */
+export function getRoutingSource() {
+  return roadSource;
+}
+
 export function legSeconds(a, b) {
   if (!a || !b) return UNKNOWN_LEG_SECONDS;
+  if (a.id && b.id) {
+    const road = roadPairs.get(`${a.id}|${b.id}`);
+    if (typeof road === 'number') return road;
+  }
   const meters = distanceMeters(a.lat, a.lng, b.lat, b.lng);
   if (meters === null) return UNKNOWN_LEG_SECONDS;
   return (meters * ROAD_CIRCUITY_FACTOR) / AVG_SPEED_METERS_PER_SEC;

@@ -34,6 +34,83 @@ function withTimeout(promise, ms) {
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
 }
 
+/**
+ * Geocoding with a second opinion. OpenCage is asked for up to 5 candidates
+ * (it used to return only the first, so a wrong-place first hit was final).
+ * If the best candidate does not match the typed house number, or is not
+ * rooftop-level accurate, Mapbox Geocoding (when MAPBOX_ACCESS_TOKEN is set)
+ * is asked too, and the candidate that matches the house number best wins.
+ * The response keeps OpenCage's shape so the client is unchanged.
+ */
+function typedHouseNumber(address) {
+  const m = String(address || '').match(/^\s*(\d+[A-Za-z]?)\b/);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function scoreCandidate(c, houseNumber) {
+  const got = String(c?.components?.house_number || '').toLowerCase();
+  let score = (typeof c.confidence === 'number' ? c.confidence : 0) / 10;
+  if (houseNumber) score += got === houseNumber ? 3 : got ? -1 : -2;
+  return score;
+}
+
+async function fetchOpenCage(address, bounds, apiKey) {
+  const params = new URLSearchParams({ q: address, key: apiKey, limit: '5', no_annotations: '1' });
+  if (bounds) params.set('bounds', bounds);
+  const url = `https://api.opencagedata.com/geocode/v1/json?${params.toString()}`;
+  let lastError;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const upstream = await withTimeout(fetch(url), REQUEST_TIMEOUT_MS);
+      // 401 (bad key) and 402 (quota) are configuration/billing problems, not transient.
+      if (upstream.status === 401) return { error: 'Geocoding service is misconfigured (invalid API key).', status: 500 };
+      if (upstream.status === 402) return { error: 'Geocoding service has reached its daily quota. Try again later.', status: 502 };
+      if (!upstream.ok) {
+        const retryable = upstream.status === 429 || upstream.status >= 500;
+        if (!retryable || attempt === MAX_RETRIES) return { error: `Geocoding provider returned ${upstream.status}`, status: 502 };
+        await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
+        continue;
+      }
+      const data = await upstream.json();
+      return { candidates: Array.isArray(data?.results) ? data.results : [] };
+    } catch (err) {
+      lastError = err;
+      if (attempt === MAX_RETRIES) break;
+      await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
+    }
+  }
+  return { error: lastError?.message || 'Failed to reach the geocoding service.', status: 502 };
+}
+
+const MAPBOX_ACCURACY_CONFIDENCE = { rooftop: 10, parcel: 9, point: 9, interpolated: 7, approximate: 5, street: 5 };
+
+async function fetchMapbox(address, bounds, token) {
+  try {
+    const params = new URLSearchParams({ q: address, country: 'us', limit: '5', types: 'address', access_token: token });
+    if (bounds) params.set('bbox', bounds); // same field order: minLng,minLat,maxLng,maxLat
+    const res = await withTimeout(fetch(`https://api.mapbox.com/search/geocode/v6/forward?${params.toString()}`), REQUEST_TIMEOUT_MS);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data?.features || [])
+      .map((f) => {
+        const [lng, lat] = f?.geometry?.coordinates || [];
+        if (typeof lat !== 'number' || typeof lng !== 'number') return null;
+        const accuracy = f?.properties?.coordinates?.accuracy || 'approximate';
+        return {
+          formatted: f?.properties?.full_address || f?.properties?.name || address,
+          confidence: MAPBOX_ACCURACY_CONFIDENCE[accuracy] ?? 5,
+          components: { house_number: f?.properties?.context?.address?.address_number || '', road: f?.properties?.context?.street?.name || '' },
+          geometry: { lat, lng },
+          provider: 'mapbox'
+        };
+      })
+      .filter(Boolean);
+  } catch (err) {
+    console.warn('geocode: Mapbox lookup failed:', err?.message || err);
+    return [];
+  }
+}
+
 export default async function handler(req, res) {
   if (req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -45,8 +122,9 @@ export default async function handler(req, res) {
   }
 
   const apiKey = process.env.OPENCAGE_API_KEY;
-  if (!apiKey) {
-    console.error('geocode: OPENCAGE_API_KEY is not configured on the server.');
+  const mapboxToken = process.env.MAPBOX_ACCESS_TOKEN;
+  if (!apiKey && !mapboxToken) {
+    console.error('geocode: neither OPENCAGE_API_KEY nor MAPBOX_ACCESS_TOKEN is configured.');
     return res.status(500).json({ error: 'Geocoding service is not configured on the server.' });
   }
 
@@ -54,62 +132,32 @@ export default async function handler(req, res) {
   if (!address) {
     return res.status(400).json({ error: 'Missing or empty "address" query parameter.' });
   }
-
-  // Optional bbox passthrough from the client (minLng,minLat,maxLng,maxLat)
-  // so the operating-territory filter lives in one config value rather
-  // than being duplicated between client and server. OpenCage's `bounds`
-  // param is min_lon,min_lat,max_lon,max_lat — same field order as this
-  // app's existing VITE_GEOCODING_BBOX, so no reordering needed.
+  // Optional territory box from the client (minLng,minLat,maxLng,maxLat).
   const bounds = typeof req.query?.bounds === 'string' ? req.query.bounds.trim() : '';
+  const houseNumber = typedHouseNumber(address);
 
-  const params = new URLSearchParams({
-    q: address,
-    key: apiKey,
-    limit: '1',
-    no_annotations: '1' // this app only needs lat/lng/formatted/confidence, not OpenCage's extra metadata
-  });
-  if (bounds) {
-    params.set('bounds', bounds);
-  }
-  const url = `https://api.opencagedata.com/geocode/v1/json?${params.toString()}`;
-
-  let lastError;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      const upstream = await withTimeout(fetch(url), REQUEST_TIMEOUT_MS);
-
-      // OpenCage's documented status codes: 401 (bad key) and 402 (quota
-      // exceeded) are configuration/billing problems, not transient
-      // network issues — retrying won't help and would just waste the
-      // retry budget, so these fail fast with a clear message instead of
-      // silently retrying into the same wall three times.
-      if (upstream.status === 401) {
-        console.error('geocode: OpenCage rejected the configured API key (401).');
-        return res.status(500).json({ error: 'Geocoding service is misconfigured (invalid API key).' });
-      }
-      if (upstream.status === 402) {
-        console.error('geocode: OpenCage daily quota exceeded (402).');
-        return res.status(502).json({ error: 'Geocoding service has reached its daily quota. Try again later.' });
-      }
-
-      if (!upstream.ok) {
-        const retryable = upstream.status === 429 || upstream.status >= 500;
-        if (!retryable || attempt === MAX_RETRIES) {
-          return res.status(502).json({ error: `Geocoding provider returned ${upstream.status}` });
-        }
-        await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
-        continue;
-      }
-
-      const data = await upstream.json();
-      return res.status(200).json(data);
-    } catch (err) {
-      lastError = err;
-      if (attempt === MAX_RETRIES) break;
-      await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
-    }
+  let candidates = [];
+  let firstError = null;
+  if (apiKey) {
+    const oc = await fetchOpenCage(address, bounds, apiKey);
+    if (oc.error) firstError = oc;
+    else candidates = oc.candidates;
   }
 
-  console.error('OpenCage geocoding proxy failed:', lastError);
-  return res.status(502).json({ error: lastError?.message || 'Failed to reach the geocoding service.' });
+  const best = () => [...candidates].sort((a, b) => scoreCandidate(b, houseNumber) - scoreCandidate(a, houseNumber))[0];
+  const top = best();
+  const good = top && (!houseNumber || String(top.components?.house_number || '').toLowerCase() === houseNumber) && top.confidence >= 9;
+
+  if (!good && mapboxToken) {
+    const extra = await fetchMapbox(address, bounds, mapboxToken);
+    candidates = [...candidates, ...extra];
+  }
+
+  if (candidates.length === 0) {
+    if (firstError) return res.status(firstError.status).json({ error: firstError.error });
+    return res.status(200).json({ results: [] });
+  }
+
+  const winner = best();
+  return res.status(200).json({ results: [winner] });
 }

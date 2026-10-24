@@ -93,7 +93,7 @@ function normalizeWindow(text) {
   return t;
 }
 
-async function callGroqWithRetry(imageBase64) {
+async function callGroqWithRetry(imageBase64, hintText = '') {
   let lastError;
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -134,7 +134,11 @@ Rules:
 - deliveryWindow: only the time part, e.g. "by 5:00 PM", "8:00 AM - 3:00 PM" or "3:00 - 8:00 AM"; drop the words "Scheduled", "Deliver" and "Today". null if not shown.
 - notes: any gray tag or extra instruction shown for the stop (for example "Locker"), else null.
 - If the same address line appears twice in one row, output it once.
-- Include every fully visible row, in on-screen order. Skip a row that is cut off at the top or bottom edge so that its pin number or address cannot be read with certainty. Never guess.`
+- Include every fully visible row, in on-screen order. Skip a row that is cut off at the top or bottom edge so that its pin number or address cannot be read with certainty. Never guess.${
+                    hintText
+                      ? `\n\nA rough on-device text scan of the same screenshot is below. It may contain mistakes (misread digits, merged or missing lines). Use it only to help confirm what you read; the image is the source of truth.\n<text_scan>\n${hintText}\n</text_scan>`
+                      : ''
+                  }`
                 },
                 { type: 'image_url', image_url: { url: imageBase64 } }
               ]
@@ -177,6 +181,12 @@ export default async function handler(req, res) {
 
   try {
     const { imageBase64 } = req.body || {};
+    // Optional rough text scan from the device, used only as a hint. Trimmed,
+    // length-capped, and stripped of the delimiter tag so it can't alter the prompt structure.
+    const hintText =
+      typeof req.body?.hintText === 'string'
+        ? req.body.hintText.replace(/<\/?text_scan>/gi, '').trim().slice(0, 6000)
+        : '';
 
     if (!imageBase64) {
       return res.status(400).json({ error: 'Missing image payload.' });
@@ -190,7 +200,7 @@ export default async function handler(req, res) {
 
     let completion;
     try {
-      completion = await callGroqWithRetry(imageBase64);
+      completion = await callGroqWithRetry(imageBase64, hintText);
     } catch (err) {
       console.error('Groq OCR call failed after retries:', err);
       const status = err?.status || err?.response?.status;

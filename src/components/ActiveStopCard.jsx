@@ -27,6 +27,13 @@ const VEHICLE_ZONES = [
   { value: 'trunk_center', label: '📦 Trunk Ctr' }
 ];
 
+// US units: feet when very close, otherwise miles.
+function formatDistanceAway(meters) {
+  const miles = meters / 1609.344;
+  if (miles < 0.1) return `${Math.max(10, Math.round((meters * 3.28084) / 10) * 10)} ft away`;
+  return `${miles.toFixed(1)} mi away`;
+}
+
 const STOP_TIMER_KEY = 'flexpulse.stopTimer.v1';
 
 function getStopStart(stopId) {
@@ -257,9 +264,7 @@ export default function ActiveStopCard({
           </span>
           {proximity && !proximity.arrived && (
             <span className="bg-neutral-800 text-neutral-300 text-xs font-semibold px-2.5 py-1 rounded-md">
-              📍 {proximity.meters < 1000
-                ? `${Math.round(proximity.meters)} m away`
-                : `${(proximity.meters / 1000).toFixed(1)} km away`}
+              📍 {formatDistanceAway(proximity.meters)}
             </span>
           )}
           {currentStop.deliveryWindow && (

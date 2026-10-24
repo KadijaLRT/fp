@@ -11,7 +11,7 @@ import { checkRateLimit, sendRateLimitResponse } from './_rateLimit.js';
 // the usual figure for suburban street grids), divided by an average
 // delivery-driving speed that already bakes in turns and stop signs.
 const ROAD_CIRCUITY_FACTOR = 1.35;
-const AVG_SPEED_METERS_PER_SEC = 9; // ~32 km/h / 20 mph residential driving
+const AVG_SPEED_METERS_PER_SEC = 9; // ~20 mph residential driving
 // Hard ceiling so a pathological request can't blow the function's budget.
 const MAX_TOTAL_STOPS = 100;
 
@@ -51,6 +51,78 @@ function buildFullDurationMatrix(stops) {
     }
   }
   return full;
+}
+
+/**
+ * Real road driving times from the Mapbox Matrix API (profile "driving").
+ * The API accepts at most 25 coordinates per request, so stops are split
+ * into chunks of 12 and every ordered chunk pair is requested (sources =
+ * first chunk, destinations = second chunk). Any request that fails or
+ * times out leaves its cells to the local straight-line estimate, so a
+ * Mapbox hiccup degrades accuracy but never breaks route building.
+ *
+ * @returns {Promise<{ durations:number[][], source:'road'|'mixed'|'estimate' }>}
+ */
+async function buildDurations(nodes) {
+  const estimate = buildFullDurationMatrix(nodes);
+  const token = process.env.MAPBOX_ACCESS_TOKEN;
+  if (!token || nodes.length < 2) return { durations: estimate, source: 'estimate' };
+
+  const n = nodes.length;
+  const CHUNK = 12;
+  const chunks = [];
+  for (let i = 0; i < n; i += CHUNK) chunks.push(Array.from({ length: Math.min(CHUNK, n - i) }, (_, k) => i + k));
+
+  const jobs = [];
+  for (const I of chunks) for (const J of chunks) jobs.push({ I, J });
+
+  const durations = estimate.map((row) => row.slice());
+  let okCells = 0;
+  const totalCells = n * n - n;
+  const controller = new AbortController();
+  const overall = setTimeout(() => controller.abort(), 6500); // stay inside the function's time budget
+
+  async function run({ I, J }) {
+    const same = I === J;
+    const idx = same ? I : [...I, ...J];
+    const coords = idx.map((k) => `${nodes[k].lng.toFixed(6)},${nodes[k].lat.toFixed(6)}`).join(';');
+    const qs = new URLSearchParams({ annotations: 'duration', access_token: token });
+    if (!same) {
+      qs.set('sources', I.map((_, k) => k).join(';'));
+      qs.set('destinations', J.map((_, k) => I.length + k).join(';'));
+    }
+    try {
+      const res = await fetch(`https://api.mapbox.com/directions-matrix/v1/mapbox/driving/${coords}?${qs.toString()}`, { signal: controller.signal });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data?.code !== 'Ok' || !Array.isArray(data.durations)) return;
+      I.forEach((a, r) => {
+        J.forEach((b, c) => {
+          const v = data.durations[r]?.[c];
+          if (a !== b && typeof v === 'number' && Number.isFinite(v)) {
+            durations[a][b] = v;
+            okCells++;
+          }
+        });
+      });
+    } catch {
+      /* aborted or network error: those cells keep the estimate */
+    }
+  }
+
+  // Small pool: well under Mapbox's per-minute request limit.
+  let cursor = 0;
+  const workers = Array.from({ length: 4 }, async () => {
+    while (cursor < jobs.length) {
+      const job = jobs[cursor++];
+      await run(job);
+    }
+  });
+  await Promise.all(workers);
+  clearTimeout(overall);
+
+  const source = okCells === 0 ? 'estimate' : okCells >= totalCells ? 'road' : 'mixed';
+  return { durations: source === 'estimate' ? estimate : durations, source };
 }
 
 /**
@@ -348,18 +420,29 @@ export default async function handler(req, res) {
     // the route may start at whichever stop makes the whole path shortest.
     const hasOrigin = isValidCoord(origin);
     const nodes = hasOrigin ? [{ id: '__origin__', lat: origin.lat, lng: origin.lng }, ...stops] : stops;
-    const durations = buildFullDurationMatrix(nodes);
+    const { durations, source: routingSource } = await buildDurations(nodes);
 
     let orderIdxs = solveRoute(nodes, durations, strategy, hasOrigin);
     const estimatedDrivingSeconds = estimateDrivingSeconds(orderIdxs, durations);
     if (hasOrigin) orderIdxs = orderIdxs.filter((i) => i !== 0).map((i) => i - 1);
     const optimizedStops = orderIdxs.map((idx) => stops[idx]);
 
+    // Pairwise drive times for the real stops (origin row/column removed) so the
+    // app can price ANY order (Amazon's, drag-and-drop edits) with the same
+    // road times instead of straight-line guesses.
+    const offset = hasOrigin ? 1 : 0;
+    const matrix = {
+      ids: stops.map((st) => st.id),
+      seconds: stops.map((_, i) => stops.map((__, j) => Math.round(durations[i + offset][j + offset])))
+    };
+
     return res.status(200).json({
       success: true,
       strategy,
       optimizedStops,
-      estimatedDrivingSeconds
+      estimatedDrivingSeconds,
+      routingSource,
+      matrix
     });
   } catch (error) {
     console.error('Unhandled optimize endpoint error:', error);

@@ -1417,3 +1417,16 @@ It now works like this (`src/utils/driveCalibration.js`):
 
 ## Buttons
 - Stop card: DELIVERED is the large top button; NAVIGATE now sits beside SKIP.
+
+## Drag and drop, text scan first, miles
+- List view: drag the ⠿ handle to reorder undelivered stops (arrows removed). Delivered stops stay put.
+- Screenshots: on-device text scan runs first; the AI read then confirms and maps the stops using that text as a hint. Per screenshot you see "N confirmed, M to check". Stops only the text scan found are kept but flagged; if the AI read fails, the text-scan draft is used instead of failing.
+- Parser splits "2 # G-1.3A Deliver by 5:00 PM" (pin number and header on one line) as real Tesseract output produces.
+- Distances show in feet/miles.
+
+## Real road times, better geocoding, patient scanning
+- Set `MAPBOX_ACCESS_TOKEN` (Vercel env). /api/optimize then uses the Mapbox Matrix API for real road driving times (16 requests / ~2,100 elements for a 46-stop route; failed chunks fall back to the straight-line estimate, response field `routingSource` = road | mixed | estimate). The pairwise matrix is returned and kept on the device so Amazon's order, the optimized order and drag-and-drop edits are all priced with the same road times.
+- Time-saved calibration is kept separately for road vs straight-line models (prior for road times is an assumption, 0.8, until real legs are learned).
+- /api/geocode asks OpenCage for 5 candidates, picks the one matching the typed house number, and asks Mapbox for a second opinion when the best match is not rooftop-accurate or the house number does not match.
+- Screenshot scanning retries busy/rate-limited responses with growing waits (and runs 2 at a time) instead of failing later screenshots in a batch.
+- The map's dashed line is still drawn straight between pins (indicative only); it is not used for any time estimate.

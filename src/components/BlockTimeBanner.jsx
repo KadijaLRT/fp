@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { parseDeadlineToday } from '../utils/deadlineProjection';
+import { getRoutingSource } from '../utils/etaEstimate';
 import { compareToAmazonOrder, formatDuration } from '../utils/etaEstimate';
 import { getCalibration, estimateSavings, formatRangeMinutes } from '../utils/driveCalibration';
 
@@ -45,7 +46,9 @@ export default function BlockTimeBanner({ stops, currentIndex, routeStartedAtMs,
       <p className="text-[10px] text-neutral-600 mt-0.5">
         {savings.calibrated
           ? `Estimate tuned to your pace (${savings.legsUsed} stops learned)`
-          : 'Rough estimate; gets sharper as you complete routes'}
+          : getRoutingSource() === 'road'
+            ? 'Uses real road times; gets sharper as you complete routes'
+            : 'Straight-line estimate (road times unavailable); gets sharper as you complete routes'}
       </p>
     </div>
   ) : null;

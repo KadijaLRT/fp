@@ -28,7 +28,7 @@ export default function StopListView({
   onStartEdit,
   onCancelEdit,
   onSaveEdit,
-  onReorder,
+  onMoveStop,
   onMarkDelivered,
   onAddStop
 }) {
@@ -71,6 +71,68 @@ export default function StopListView({
     }
   }, [editingStopId, stops]);
 
+  // Drag and drop (pointer events, works for touch and mouse). Only stops that
+  // are not delivered can move, and only among themselves. Dragging by the
+  // handle keeps normal page scrolling everywhere else on the row.
+  const rowRefs = useRef(new Map());
+  const dragRef = useRef(null);
+  const [drag, setDrag] = useState(null); // { from, over, dy }
+
+  const startDrag = (e, idx) => {
+    if (!onMoveStop || idx < currentIndex) return;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+    // Snapshot row midpoints (movable rows only) so targets stay stable while dragging.
+    const mids = [];
+    for (let i = currentIndex; i < stops.length; i++) {
+      const el = rowRefs.current.get(i);
+      if (el) {
+        const r = el.getBoundingClientRect();
+        mids.push({ i, mid: r.top + r.height / 2 });
+      }
+    }
+    dragRef.current = { from: idx, startY: e.clientY, mids, scrollY: window.scrollY };
+    setDrag({ from: idx, over: idx, dy: 0 });
+  };
+
+  const moveDrag = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    // Account for page scroll that happens during the drag.
+    const dy = e.clientY - d.startY + (window.scrollY - d.scrollY);
+    const pointerDocY = e.clientY;
+    let over = d.from;
+    let best = Infinity;
+    d.mids.forEach(({ i, mid }) => {
+      const dist = Math.abs(pointerDocY - (mid - (window.scrollY - d.scrollY)));
+      if (dist < best) {
+        best = dist;
+        over = i;
+      }
+    });
+    // Edge auto-scroll so long lists can be dragged end to end.
+    if (e.clientY < 90) window.scrollBy(0, -12);
+    else if (e.clientY > window.innerHeight - 90) window.scrollBy(0, 12);
+    setDrag({ from: d.from, over, dy });
+  };
+
+  const endDrag = (e) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    if (!d) return;
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+    const finalOver = drag ? drag.over : d.from;
+    setDrag(null);
+    if (finalOver !== d.from && finalOver >= currentIndex) {
+      onMoveStop(stops[d.from].id, finalOver);
+    }
+  };
+
+  const cancelDrag = () => {
+    dragRef.current = null;
+    setDrag(null);
+  };
+
   return (
     <div className="max-w-md mx-auto px-4">
       <div className="space-y-1.5">
@@ -91,8 +153,6 @@ export default function StopListView({
           // The current stop is the first movable row, so it can't go "up"
           // (that would put it among completed stops); the last row can't
           // go "down". Disabled rather than clickable-but-inert.
-          const canMoveUp = isEditable && idx > currentIndex;
-          const canMoveDown = isEditable && idx < stops.length - 1;
           const isConfirmingDelivered = confirmDeliveredId === stop.id;
 
           return (
@@ -103,7 +163,18 @@ export default function StopListView({
               </p>
             )}
             <div
-              className={`w-full rounded-xl border px-3 py-2.5 transition-all ${
+              ref={(el) => {
+                if (el) rowRefs.current.set(idx, el);
+                else rowRefs.current.delete(idx);
+              }}
+              style={
+                drag && drag.from === idx
+                  ? { transform: `translateY(${drag.dy}px)`, zIndex: 20, position: 'relative', boxShadow: '0 8px 24px rgba(0,0,0,.6)', opacity: 0.95 }
+                  : undefined
+              }
+              className={`w-full rounded-xl border px-3 py-2.5 ${
+                drag && drag.from !== idx && drag.over === idx ? 'ring-2 ring-amber-400' : ''
+              } ${drag ? '' : 'transition-all'} ${
                 isCurrent
                   ? 'bg-amber-950/40 border-amber-600'
                   : isCompleted
@@ -168,28 +239,18 @@ export default function StopListView({
                   >
                     ✓
                   </button>
-                  {isEditable && (
-                    <div className="flex flex-col">
-                      <button
-                        type="button"
-                        onClick={() => onReorder(stop.id, 'up')}
-                        disabled={!canMoveUp}
-                        className="w-9 h-6 text-neutral-300 text-sm disabled:opacity-25"
-                        aria-label="Move stop earlier"
-                      >
-                        ▲
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => onReorder(stop.id, 'down')}
-                        disabled={!canMoveDown}
-                        className="w-9 h-6 text-neutral-300 text-sm disabled:opacity-25"
-                        aria-label="Move stop later"
-                      >
-                        ▼
-                      </button>
-                    </div>
-                  )}
+                  <button
+                    type="button"
+                    onPointerDown={(e) => startDrag(e, idx)}
+                    onPointerMove={moveDrag}
+                    onPointerUp={endDrag}
+                    onPointerCancel={cancelDrag}
+                    style={{ touchAction: 'none' }}
+                    className="w-11 h-11 text-xl text-neutral-400 cursor-grab active:cursor-grabbing select-none"
+                    aria-label="Drag to reorder"
+                  >
+                    ⠿
+                  </button>
                   <button
                     type="button"
                     onClick={() => onStartEdit(stop.id)}

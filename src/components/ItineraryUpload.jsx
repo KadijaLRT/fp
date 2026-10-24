@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import ManualStopReview from './ManualStopReview';
 import { parseRawOcrText, emptyStop } from '../utils/ocrTextParser';
+import { scanTextFromImage, terminateTextScanWorker, reconcileStops } from '../utils/textScan';
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB
 const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif'];
@@ -18,7 +19,7 @@ const UPLOAD_TIMEOUT_MS = 45000;
 // them with limited concurrency (not all at once) keeps this comfortably
 // under /api/ocr's rate limit even for a larger batch, and keeps the
 // progress UI readable rather than a wall of simultaneous spinners.
-const OCR_CONCURRENCY = 3;
+const OCR_CONCURRENCY = 2;
 
 function withTimeout(promise, ms) {
   let timeoutId;
@@ -113,23 +114,45 @@ async function convertToBase64(file) {
  * image, mirroring the geocodeAddressBatch/upsertLocationBatch pattern
  * used elsewhere in the app.
  */
-async function ocrSingleFile(file) {
+async function ocrSingleFile(file, hintText = '') {
   try {
     const base64Image = await convertToBase64(file);
-    const response = await withTimeout(
-      fetch('/api/ocr', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: base64Image })
-      }),
-      UPLOAD_TIMEOUT_MS
-    );
-
+    // Busy/rate-limited responses (429, 5xx, timeouts) are retried with growing
+    // waits instead of failing the screenshot: later screenshots in a big
+    // batch used to fail here, which looked like "only a few scanned".
+    const waits = [0, 5000, 12000, 25000];
+    let response;
     let result;
-    try {
-      result = await response.json();
-    } catch {
-      throw new Error('Server sent back an unreadable response.');
+    let lastErr = null;
+    for (let attempt = 0; attempt < waits.length; attempt++) {
+      if (waits[attempt]) await new Promise((r) => setTimeout(r, waits[attempt]));
+      try {
+        response = await withTimeout(
+          fetch('/api/ocr', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ imageBase64: base64Image, hintText: hintText || undefined })
+          }),
+          UPLOAD_TIMEOUT_MS
+        );
+      } catch (netErr) {
+        lastErr = netErr;
+        continue; // network hiccup or timeout: try again
+      }
+      if (response.status === 429 || response.status >= 500) {
+        lastErr = new Error('The scanner is busy.');
+        continue;
+      }
+      try {
+        result = await response.json();
+      } catch {
+        throw new Error('Server sent back an unreadable response.');
+      }
+      lastErr = null;
+      break;
+    }
+    if (lastErr || !response || !result) {
+      throw new Error(`${lastErr?.message || 'Scan failed'} Tap "Retry failed screenshots" in a moment.`);
     }
 
     if (!response.ok || !result.success) {
@@ -143,6 +166,32 @@ async function ocrSingleFile(file) {
   } catch (err) {
     return { stops: null, error: err.message || 'Something went wrong processing this screenshot.' };
   }
+}
+
+/**
+ * Text scan first (on device, free, no rate limit), then the AI read confirms
+ * and maps the stops using that text as a hint. Stops both agree on are marked
+ * confirmed. If the AI read fails, the text-scan draft is kept for review
+ * instead of failing the whole screenshot.
+ */
+async function processScreenshot(file) {
+  const text = await scanTextFromImage(file);
+  const ai = await ocrSingleFile(file, text || '');
+
+  if (ai.stops) {
+    const { stops, confirmedCount, extraCount } = reconcileStops(ai.stops, text);
+    return { stops, error: null, note: text ? `${confirmedCount} confirmed${extraCount ? `, ${extraCount} to check` : ''}` : 'AI read only' };
+  }
+
+  const draft = text ? parseRawOcrText(text).filter((st) => st.address) : [];
+  if (draft.length > 0) {
+    return {
+      stops: draft.map((st) => ({ ...st, scanConfirmed: false, needsManualReview: true })),
+      error: null,
+      note: 'text scan only, check addresses'
+    };
+  }
+  return { stops: null, error: ai.error, note: null };
 }
 
 let nextBatchItemId = 1;
@@ -197,9 +246,9 @@ export default function ItineraryUpload({ onRouteImported }) {
         isFirst = false;
 
         updateBatchItem(item.id, { status: 'processing' });
-        const { stops, error: ocrError } = await ocrSingleFile(item.file);
+        const { stops, error: ocrError, note } = await processScreenshot(item.file);
         if (stops) {
-          updateBatchItem(item.id, { status: 'success', stops, error: null });
+          updateBatchItem(item.id, { status: 'success', stops, error: null, note });
         } else {
           updateBatchItem(item.id, { status: 'error', stops: null, error: ocrError });
         }
@@ -208,6 +257,7 @@ export default function ItineraryUpload({ onRouteImported }) {
 
     const workers = Array.from({ length: Math.min(OCR_CONCURRENCY, items.length) }, worker);
     await Promise.all(workers);
+    await terminateTextScanWorker();
     setBatchRunning(false);
   };
 
@@ -552,7 +602,7 @@ export default function ItineraryUpload({ onRouteImported }) {
                     <span className="truncate flex-1 text-neutral-300">{item.file?.name || 'Manually entered'}</span>
                     {item.status === 'success' && (
                       <span className="text-emerald-600 font-semibold ml-2 whitespace-nowrap">
-                        ✓ {item.stops.length} stops
+                        ✓ {item.stops.length} stops{item.note ? ` · ${item.note}` : ''}
                       </span>
                     )}
                     {item.status === 'error' && (
@@ -560,7 +610,7 @@ export default function ItineraryUpload({ onRouteImported }) {
                     )}
                     {(item.status === 'pending' || item.status === 'processing') && (
                       <span className="text-neutral-500 ml-2 whitespace-nowrap">
-                        ⏳ {item.status === 'processing' ? 'Scanning…' : 'Queued'}
+                        ⏳ {item.status === 'processing' ? 'Reading text, then checking…' : 'Queued'}
                       </span>
                     )}
                   </div>
@@ -633,15 +683,6 @@ export default function ItineraryUpload({ onRouteImported }) {
               </div>
             )}
           </div>
-        )}
-
-        {batch.length === 0 && (
-          <button
-            onClick={() => handleManualEntry(null)}
-            className="mt-3 text-xs text-neutral-600 underline"
-          >
-            Enter stops manually instead
-          </button>
         )}
       </div>
     </div>

@@ -73,6 +73,13 @@ export function parseRawOcrText(rawText) {
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean)
+    // Tesseract often reads the map-pin number and the "# code • window" line as
+    // ONE line ("2 # G-1.3A Deliver by 5:00 PM"); split them apart so the pin
+    // number is recognised and the header never looks like an address.
+    .flatMap((l) => {
+      const m = l.match(/^(\d{1,3})\s+(#.*)$/);
+      return m ? [m[1], m[2]] : [l];
+    })
     // Flex sometimes prints the street line twice in a row; keep one.
     .filter((l, i, arr) => i === 0 || l.toLowerCase() !== arr[i - 1].toLowerCase());
 
