@@ -58,6 +58,92 @@ function stripKnownMetadata(text) {
   return text.replace(PACKAGE_COUNT_PATTERN, ' ').replace(TIME_WINDOW_PATTERN, ' ');
 }
 
+
+/**
+ * Layout B: the pin number and "Expected by 8:00 AM" share one header line
+ * ("38) © Expected by 8:00 AM 1"), followed by the route code line
+ * ("# A.L01.OV"), the street line and the city line. The package count is
+ * the digit before the box icon at the end of the header. Returns null when
+ * the text does not look like this layout.
+ *
+ * Misread pin digits (82 for 32, 28 for 26) are repaired: rows in one
+ * screenshot are consecutive, so the most common (number - row position)
+ * offset wins and outliers are snapped to it.
+ */
+const TIME_ANY = /\b\d{1,2}:\d{2}\s*[AP]M\b/i;
+
+function parseExpectedLayout(lines) {
+  const headers = [];
+  lines.forEach((line, i) => {
+    if (!TIME_ANY.test(line) || /^#/.test(line)) return;
+    const m = line.match(/^\W{0,2}([A-Za-z0-9]{1,3})\s*[\)\]]?\s*\W{0,4}\s/);
+    if (!m) return;
+    const token = m[1];
+    // Letters in the number ("B8" for 38, "a0" for 40) are misreads: the digit
+    // value is unreliable, so the row's number is repaired from its neighbours.
+    const uncertain = /[^0-9OolI]/.test(token);
+    const num = parseInt(token.replace(/[Oo]/g, '0').replace(/[lI]/g, '1').replace(/\D/g, ''), 10);
+    headers.push({ i, num: Number.isInteger(num) && num >= 1 ? num : null, uncertain: uncertain || !(num >= 1), line });
+  });
+  if (headers.length < 2) return null;
+
+  const rows = [];
+  headers.forEach((h, k) => {
+    const end = k + 1 < headers.length ? headers[k + 1].i : lines.length;
+    const block = lines.slice(h.i + 1, end).filter((l) => !/^#/.test(l));
+    const streetIdx = block.findIndex((l) => /^\d+[A-Za-z]?\s+\S+/.test(l));
+    if (streetIdx === -1) return; // cut off at the screen edge
+    const street = block[streetIdx].replace(/\s+/g, ' ').trim();
+    const cityLine = block.slice(streetIdx + 1).find((l) => /^[A-Za-z][A-Za-z .'\-]{2,}$/.test(l));
+    const afterTime = h.line.slice(h.line.search(TIME_ANY));
+    const pkg = afterTime.match(/[AP]M\s+(\d)\S?\s*$/i);
+    const by = /\bb[yv]\b/i.test(h.line.slice(0, h.line.search(TIME_ANY)));
+    const timeText = (afterTime.match(TIME_ANY) || [''])[0].replace(/\s+/g, ' ');
+    rows.push({
+      pos: k,
+      num: h.num,
+      uncertain: h.uncertain,
+      street,
+      city: cityLine ? cityLine.replace(/\s+/g, ' ').trim() : null,
+      count: pkg ? Math.max(1, parseInt(pkg[1], 10)) : 1,
+      window: timeText ? `${by ? 'by ' : ''}${timeText}` : null
+    });
+  });
+  if (rows.length === 0) return null;
+
+  // Repair misread pin numbers using the consecutive-row offset (rows on one
+  // screenshot are consecutive), counting only rows whose number read cleanly.
+  const counts = new Map();
+  rows.forEach((r) => {
+    if (!r.uncertain && r.num !== null) counts.set(r.num - r.pos, (counts.get(r.num - r.pos) || 0) + 1);
+  });
+  let best = null;
+  counts.forEach((c, off) => {
+    if (!best || c > best.c) best = { off, c };
+  });
+  const certainRows = rows.filter((r) => !r.uncertain && r.num !== null).length;
+  const trusted = best && best.c >= 2 && best.c >= Math.ceil(certainRows / 2);
+  rows.forEach((r) => {
+    if (trusted) {
+      r.num = best.off + r.pos;
+      r.ok = r.num >= 1;
+    } else {
+      r.ok = !r.uncertain && r.num !== null;
+    }
+  });
+
+  return rows.map((r) => ({
+    stopNumber: r.num ?? 0,
+    numberFromPin: r.ok,
+    cityFound: Boolean(r.city),
+    address: r.city ? `${r.street}, ${r.city}` : r.street,
+    packageCount: r.count,
+    deliveryWindow: r.window,
+    notes: null,
+    needsManualReview: true
+  }));
+}
+
 /**
  * Splits raw OCR text into candidate stop blocks and extracts whatever
  * fields it can find. Always returns at least one (possibly mostly-empty)
@@ -82,6 +168,9 @@ export function parseRawOcrText(rawText) {
     })
     // Flex sometimes prints the street line twice in a row; keep one.
     .filter((l, i, arr) => i === 0 || l.toLowerCase() !== arr[i - 1].toLowerCase());
+
+  const layoutB = parseExpectedLayout(lines);
+  if (layoutB) return layoutB;
 
   // Bug fix: this used to filter `lines` into `candidateLines` (losing
   // each line's original position), then re-find each one's index via

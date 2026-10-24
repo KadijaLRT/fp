@@ -1456,3 +1456,9 @@ It now works like this (`src/utils/driveCalibration.js`):
 - After scanning, Continue opens a confirm screen with every merged stop. Each stop has an editable Stop # (the Amazon pin number), address, packages, window and notes. Duplicate or missing numbers are blocked, and removing a stop does not renumber the others.
 - Only after you confirm are addresses geocoded and the route ordered (/api/geocode, /api/optimize).
 - If a screenshot can't be read, the row says so; use "Or type stops in manually" or add the stops on the confirm screen.
+
+## New Flex layout supported, removal keeps order
+- Reads the layout where the pin number and "Expected by 8:00 AM" share one line, followed by the "# A.L01.OV" route code, the street line and the city line. Package count and "by 8:00 AM" window are read from the header.
+- Misread pin digits ("82" for 32, "B8" for 38, "a0" for 40) are repaired from the neighbouring rows on the same screenshot; rows that can't be repaired are sent to the confirm screen to check.
+- Screenshots are no longer shrunk to 1600px before scanning (small digits blurred); only images over 2800px are reduced.
+- On the confirm screen, removing a stop moves every later stop down one number so the list stays in order; earlier numbers keep their Amazon number.

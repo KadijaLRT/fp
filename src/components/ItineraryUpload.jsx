@@ -57,8 +57,10 @@ function readFileAsDataUrl(file) {
 // far better than PNG) before ever being sent. This can only shrink the
 // payload — never changes what text is legible, since screenshots don't
 // have DPI-sensitive fine detail the way a real photo might.
-const MAX_LONG_EDGE_PX = 1600;
-const JPEG_QUALITY = 0.85;
+// The scan runs on this phone (nothing is uploaded), and small digits blur when
+// a screenshot is shrunk, so only very large images are reduced.
+const MAX_LONG_EDGE_PX = 2800;
+const JPEG_QUALITY = 0.92;
 
 async function convertToBase64(file) {
   const original = await readFileAsDataUrl(file);

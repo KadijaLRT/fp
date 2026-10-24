@@ -38,9 +38,18 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
     });
   };
 
-  // Removing a stop keeps every other stop's Amazon number as it is.
+  // Removing a stop closes the gap: every stop numbered after it moves down
+  // by one, so the list stays in order. Earlier numbers are left alone.
   const removeStop = (idx) => {
-    setStops((prev) => prev.filter((_, i) => i !== idx));
+    setStops((prev) => {
+      const removed = parseInt(prev[idx]?.stopNumber, 10);
+      return prev
+        .filter((_, i) => i !== idx)
+        .map((s) => {
+          const n = parseInt(s.stopNumber, 10);
+          return Number.isInteger(removed) && Number.isInteger(n) && n > removed ? { ...s, stopNumber: n - 1 } : s;
+        });
+    });
   };
 
   const handleConfirm = () => {
