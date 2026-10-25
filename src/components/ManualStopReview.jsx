@@ -71,7 +71,7 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
       .map((s) => ({ ...s, stopNumber: parseInt(s.stopNumber, 10) }));
 
     if (validStops.some((s) => !Number.isInteger(s.stopNumber) || s.stopNumber < 1)) {
-      setError('Every stop needs a stop number of 1 or higher.');
+      setError(`${validStops.filter((s) => !Number.isInteger(s.stopNumber) || s.stopNumber < 1).length} stop(s) still need a number. Type the number shown in your Flex app.`);
       return;
     }
     const seenNums = new Set();
@@ -114,9 +114,17 @@ export default function ManualStopReview({ initialStops, onConfirm, onCancel }) 
                   inputMode="numeric"
                   value={stop.stopNumber ?? ''}
                   onChange={(e) => updateStop(idx, 'stopNumber', e.target.value)}
+                  placeholder="?"
                   aria-label={`Stop number for row ${idx + 1}`}
-                  className="w-16 h-9 px-2 rounded-md bg-neutral-950 border border-neutral-800 text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500"
+                  className={`w-16 h-9 px-2 rounded-md bg-neutral-950 border text-neutral-100 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500 ${
+                    stop.stopNumber === null || stop.stopNumber === undefined || stop.stopNumber === ''
+                      ? 'border-amber-500 ring-1 ring-amber-500'
+                      : 'border-neutral-800'
+                  }`}
                 />
+                {(stop.stopNumber === null || stop.stopNumber === undefined || stop.stopNumber === '') && (
+                  <span className="normal-case text-amber-400 font-semibold">type the number from Flex</span>
+                )}
               </label>
               {stops.length > 1 && (
                 <button

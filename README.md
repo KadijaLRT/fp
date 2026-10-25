@@ -1468,3 +1468,12 @@ It now works like this (`src/utils/driveCalibration.js`):
 - Fixes: no state is forced onto an address that already names a city. /api/geocode now returns up to 6 candidates. The app picks, for each stop, the candidate that fits the tightest cluster of the whole route (45 km), and prefers matches that contain the typed city. Added or edited stops are matched against the route's centre. The geocode cache was versioned (flexGeocodeCache.v2) so old wrong matches are dropped.
 - The list warning now says why a stop is flagged (different town matched, house number not found, low map accuracy, far from the rest of the route).
 - After deploying, re-import the route; routes saved before the fix keep their old pins.
+
+## Remove a stop from the live list
+- Tap a stop (or the pencil) and use "Remove this stop"; tap again to confirm. Later stops move down one number, earlier numbers keep their Amazon number. Works for upcoming and already-delivered stops; the delivered count stays correct.
+
+## Exact Amazon stop numbers
+- Stop numbers are exact reads only. The pin number sits in a gray (or green, for "Next Stop") box that the full-page text read often skips, so each box is found by colour, cropped, enlarged and read separately with a digits-only setting, then matched to its row by position. A box with a map-pin icon is re-read with the icon cropped off.
+- Numbers on one screenshot must rise (gaps are fine, repeats and backwards steps are not). When two reads disagree, the one that fits the order wins; a number that cannot be read stays blank. A gap is only filled when two certain neighbours fully determine it.
+- The old "ignore scanned numbers and renumber 2, 3, 4" option was removed. Stops with no readable number are listed first on the confirm screen with an amber "type the number from Flex" box; Continue is blocked until each has a number. The same number with a different address on two screenshots blanks the later one for you to check.
+- New layouts: "# E-29.1C • Scheduled 5:00 - 10:00 PM" on the pin row, unit lines ("Apt A"), note lines ("back door"), Mailroom and "Navy Blue" blocks, a clipped top row whose header is cut off, and street lines that contain the word MAILROOM.

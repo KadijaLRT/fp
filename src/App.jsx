@@ -1068,6 +1068,29 @@ export default function App() {
     [currentIndex]
   );
 
+  // Remove a stop from the live route. Later stop numbers move down by one so the
+  // list stays in order; earlier numbers keep their Amazon number. Removing a
+  // stop that was already delivered keeps the delivered count correct.
+  const handleRemoveStop = useCallback(
+    (stopId) => {
+      const idx = stops.findIndex((s) => s.id === stopId);
+      if (idx === -1) return;
+      const removedNum = Number(stops[idx].stopNumber);
+      setStops((prev) =>
+        prev
+          .filter((s) => s.id !== stopId)
+          .map((s) => {
+            const n = Number(s.stopNumber);
+            return Number.isFinite(removedNum) && Number.isFinite(n) && n > removedNum ? { ...s, stopNumber: n - 1 } : s;
+          })
+      );
+      if (idx < currentIndex) setCurrentIndex((c) => Math.max(0, c - 1));
+      setEditingStopId((cur) => (cur === stopId ? null : cur));
+      setRouteExplanation(null);
+    },
+    [stops, currentIndex]
+  );
+
   // "Emergency Reoptimize" — re-sequences only the *remaining* stops
   // (current position onward; anything already completed stays put).
   // Goes through the server solver when online (real driving times), and
@@ -1364,6 +1387,7 @@ export default function App() {
                 onCancelEdit={handleCancelEditStop}
                 onSaveEdit={handleSaveEditStop}
                 onMoveStop={handleMoveStop}
+                onRemoveStop={handleRemoveStop}
                 onMarkDelivered={handleMarkDeliveredFromList}
                 onAddStop={handleAddStop}
               />

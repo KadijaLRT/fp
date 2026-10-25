@@ -29,9 +29,34 @@ export default function StopListView({
   onCancelEdit,
   onSaveEdit,
   onMoveStop,
+  onRemoveStop,
   onMarkDelivered,
   onAddStop
 }) {
+  // Two-tap remove: first tap arms it, second tap removes.
+  const [confirmRemoveId, setConfirmRemoveId] = useState(null);
+  const renderRemove = (stop) =>
+    onRemoveStop ? (
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          if (confirmRemoveId === stop.id) {
+            setConfirmRemoveId(null);
+            onRemoveStop(stop.id);
+          } else {
+            setConfirmRemoveId(stop.id);
+          }
+        }}
+        className={`w-full h-10 rounded-lg text-xs font-semibold border ${
+          confirmRemoveId === stop.id
+            ? 'bg-red-600 border-red-500 text-white'
+            : 'bg-neutral-900 border-red-900 text-red-400'
+        }`}
+      >
+        {confirmRemoveId === stop.id ? `Tap again to remove stop ${stop.stopNumber}` : 'Remove this stop'}
+      </button>
+    ) : null;
   const [addOpen, setAddOpen] = useState(false);
   const [addAddress, setAddAddress] = useState('');
   const [addNumber, setAddNumber] = useState('');
@@ -315,6 +340,7 @@ export default function StopListView({
                       {isGeocodingEdit ? 'Locating…' : 'Save'}
                     </button>
                   </div>
+                  {renderRemove(stop)}
                 </div>
               ) : (
                 isExpanded && (
@@ -324,6 +350,7 @@ export default function StopListView({
                     {stop.notes && <p>📝 {stop.notes}</p>}
                     {stop.vehicleZone && <p>🚗 {stop.vehicleZone.replace(/_/g, ' ')}</p>}
                     {!hasValidCoords(stop) && <p className="text-red-400">⚠️ Address couldn't be located</p>}
+                    {renderRemove(stop)}
 
                   </div>
                 )

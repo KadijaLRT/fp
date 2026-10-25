@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import ManualStopReview from './ManualStopReview';
 import { parseRawOcrText, emptyStop } from '../utils/ocrTextParser';
-import { scanTextFromImage, terminateTextScanWorker, cleanTextScanStops } from '../utils/textScan';
+import { scanScreenshot, terminateTextScanWorker } from '../utils/textScan';
 
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8MB
 const ACCEPTED_TYPES = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp', 'image/heic', 'image/heif'];
@@ -123,22 +123,23 @@ async function processScreenshot(file, onStage = () => {}) {
     prepared = null;
   }
   onStage('Reading text on this phone...');
-  const text = await scanTextFromImage(prepared || file);
+  const { text, headerNumbers, leadingNumber } = await scanScreenshot(prepared || file);
 
-  // No AI read: the text scan gives a draft and the driver confirms every
-  // address before anything is geocoded or routed.
-  const cleanStops = cleanTextScanStops(text);
-  const draftStops = cleanStops || (text ? parseRawOcrText(text).filter((st) => st.address) : []);
+  // No AI read: the on-device scan gives a draft and the driver confirms every
+  // stop (number and address) before anything is geocoded or routed. Stop
+  // numbers are exact reads only; an unreadable number stays blank.
+  const draftStops = text ? parseRawOcrText(text, { headerNumbers, leadingNumber }).filter((st) => st.address) : [];
   if (draftStops.length === 0) {
     return {
       stops: null,
       error: 'No stops could be read from this screenshot. Try a sharper screenshot, or add its stops by hand with "Or type stops in manually".'
     };
   }
+  const blank = draftStops.filter((st) => !Number.isInteger(st.stopNumber)).length;
   return {
-    stops: draftStops.map((st) => ({ ...st, scanConfirmed: !!cleanStops, needsManualReview: !cleanStops })),
+    stops: draftStops.map((st) => ({ ...st, scanConfirmed: false, needsManualReview: true })),
     error: null,
-    note: 'text read, you confirm next'
+    note: blank ? `${draftStops.length} stops, ${blank} without a number` : `${draftStops.length} stops, numbers read`
   };
 }
 
@@ -266,7 +267,6 @@ export default function ItineraryUpload({ onRouteImported }) {
 
   const handleStartOver = () => {
     setBatch([]);
-    setSequenceMode(false);
     setError(null);
   };
 
@@ -278,80 +278,60 @@ export default function ItineraryUpload({ onRouteImported }) {
   // Result is sorted by Amazon's number. If any stop is missing its
   // number (OCR couldn't read the pin), numbers can't be trusted, so it
   // falls back to file order with sequential numbering.
-  const [sequenceMode, setSequenceMode] = useState(false);
-
   const handleContinue = () => {
     const successfulItems = batch.filter((item) => item.status === 'success');
-    const allStops = successfulItems.flatMap((item) => item.stops);
-
-    // Stops typed or text-scanned in the review screen carry per-screenshot
-    // numbers (1, 2, 3...) that would collide with real Flex numbers, so
-    // they are treated as unnumbered and slot into the unused numbers
-    // (normally the gap left by the screenshot that failed).
-    const numbered = allStops.filter((s) => !s.fromReview && Number.isInteger(s.stopNumber) && s.stopNumber > 0);
-    const unnumbered = allStops.filter((s) => !numbered.includes(s));
-
-    let mergedStops;
-    if (sequenceMode) {
-      // Driver chose to ignore the scanned pin numbers: number everything
-      // 2, 3, 4... in screenshot order (file name ascending), top to bottom,
-      // dropping only exact repeats caused by overlapping screenshots.
-      const ordered = [...successfulItems]
-        .sort((x, y) => String(x.file?.name || '').localeCompare(String(y.file?.name || ''), undefined, { numeric: true }))
-        .flatMap((item) => item.stops);
-      const seen = new Set();
-      mergedStops = [];
-      for (const st of ordered) {
-        const key = String(st.address || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-        if (key && seen.has(key)) continue;
-        seen.add(key);
-        const { fromReview, ...rest } = st;
+    const all = successfulItems
+      .flatMap((item) => item.stops || [])
+      .map(({ fromReview, scanConfirmed, needsManualReview, ...st }) => {
         void fromReview;
-        mergedStops.push({ ...rest, stopNumber: mergedStops.length + 2 });
-      }
-    } else if (numbered.length > 0) {
-      const byNumber = new Map();
-      // Same number + different address means one number was misread, NOT a
-      // duplicate: keep both (the second gets a free number) instead of
-      // silently dropping a real stop.
-      const normAddr = (a) => String(a || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-      const conflicts = [];
-      for (const stop of numbered) {
-        const existing = byNumber.get(stop.stopNumber);
-        if (!existing) {
-          byNumber.set(stop.stopNumber, stop);
-          continue;
-        }
-        const a = normAddr(existing.address);
-        const b = normAddr(stop.address);
-        const sameStop = a === b || a.includes(b) || b.includes(a);
-        if (sameStop) {
-          if ((stop.address || '').length > (existing.address || '').length) byNumber.set(stop.stopNumber, stop);
-        } else {
-          conflicts.push(stop);
-        }
-      }
-      unnumbered.push(...conflicts);
-      const used = new Set(byNumber.keys());
-      // Stop 1 is always the pickup station, so deliveries start at 2.
-      let candidate = 2;
-      for (const stop of unnumbered) {
-        while (used.has(candidate)) candidate++;
-        const { fromReview, ...rest } = stop;
-        void fromReview;
-        byNumber.set(candidate, { ...rest, stopNumber: candidate });
-        used.add(candidate);
-      }
-      mergedStops = [...byNumber.values()].sort((x, y) => x.stopNumber - y.stopNumber);
-    } else {
-      mergedStops = allStops.map(({ fromReview, ...stop }, idx) => {
-        void fromReview;
-        return { ...stop, stopNumber: idx + 2 };
+        void scanConfirmed;
+        void needsManualReview;
+        return st;
       });
+
+    const normAddr = (a) => String(a || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const sameAddr = (a, b) => {
+      const x = normAddr(a);
+      const y = normAddr(b);
+      return Boolean(x) && Boolean(y) && (x === y || x.includes(y) || y.includes(x));
+    };
+
+    // Amazon numbers are kept exactly as read. The same number seen twice with
+    // the same address is an overlap between screenshots (kept once). The same
+    // number with a DIFFERENT address means one was misread, so the later one
+    // loses its number and is left blank for the driver to check.
+    const byNumber = new Map();
+    const blanks = [];
+    for (const st of all) {
+      const n = Number.isInteger(st.stopNumber) && st.stopNumber > 0 ? st.stopNumber : null;
+      if (n === null) {
+        blanks.push({ ...st, stopNumber: null });
+        continue;
+      }
+      const existing = byNumber.get(n);
+      if (!existing) {
+        byNumber.set(n, st);
+      } else if (sameAddr(existing.address, st.address)) {
+        if ((st.address || '').length > (existing.address || '').length) byNumber.set(n, st);
+      } else {
+        blanks.push({ ...st, stopNumber: null });
+      }
+    }
+    const numbered = [...byNumber.values()].sort((x, y) => x.stopNumber - y.stopNumber);
+
+    // Numberless stops that repeat a numbered stop (or each other) are overlap.
+    const keptBlanks = [];
+    for (const st of blanks) {
+      if (numbered.some((n) => sameAddr(n.address, st.address))) continue;
+      if (keptBlanks.some((k) => sameAddr(k.address, st.address))) continue;
+      keptBlanks.push(st);
     }
 
+    // Stops with no number come first so they are the first thing checked.
+    const mergedStops = [...keptBlanks, ...numbered];
+
     if (mergedStops.length === 0) {
-      setError('No stops to import yet — process at least one screenshot successfully first.');
+      setError('No stops to import yet. Process at least one screenshot successfully first.');
       return;
     }
 
@@ -430,15 +410,16 @@ export default function ItineraryUpload({ onRouteImported }) {
   const successCount = batch.filter((i) => i.status === 'success').length;
   const errorCount = batch.filter((i) => i.status === 'error').length;
   const pendingCount = batch.filter((i) => i.status === 'pending' || i.status === 'processing').length;
-  // What Continue will actually import: numbered stops merge by Amazon number
-  // (duplicates collapse), unnumbered ones are kept.
+  // What Continue will import: numbers are kept exactly as read; stops with no
+  // readable number are listed first on the confirm screen for the driver to fill in.
   const okStops = batch.filter((i) => i.status === 'success').flatMap((i) => i.stops || []);
   const numberedList = okStops
-    .filter((st) => !st.fromReview && Number.isInteger(st.stopNumber) && st.stopNumber > 0)
+    .filter((st) => Number.isInteger(st.stopNumber) && st.stopNumber > 0)
     .map((st) => st.stopNumber);
   const seenNumbers = new Set(numberedList);
   const duplicateCount = numberedList.length - seenNumbers.size;
-  const totalMergedStops = seenNumbers.size + (okStops.length - numberedList.length);
+  const blankCount = okStops.length - numberedList.length;
+  const totalMergedStops = seenNumbers.size + blankCount;
 
   // Missing numbers between lowest and highest, collapsed into ranges ("6-10, 16-30").
   const missingNumbers = [];
@@ -572,26 +553,23 @@ export default function ItineraryUpload({ onRouteImported }) {
                     Retry {errorCount} failed screenshot{errorCount === 1 ? '' : 's'}
                   </button>
                 )}
-                {successCount > 0 && !sequenceMode && missingNumbers.length > 0 && (
+                {successCount > 0 && blankCount > 0 && (
                   <p className="text-xs text-amber-300 bg-amber-950 border border-amber-800 rounded-lg p-2.5">
-                    ⚠️ {missingCount} stop number{missingCount === 1 ? '' : 's'} not found: {missingNumbers.join(', ')}. A screenshot may be missing. Add it, or continue and use + Add a stop later.
-                    {duplicateCount > 0 ? ` ${duplicateCount} repeated stop${duplicateCount === 1 ? '' : 's'} will be merged.` : ''}
+                    ✏️ {blankCount} stop{blankCount === 1 ? ' has' : 's have'} no readable number. They are listed first on the next screen so you can type the number from your Flex app.
                   </p>
                 )}
-                {successCount > 0 && (missingCount > 0 || duplicateCount > 0 || sequenceMode) && (
-                  <label className="flex items-start gap-2 text-left text-xs text-neutral-200 bg-neutral-900 border border-neutral-700 rounded-lg p-2.5">
-                    <input type="checkbox" checked={sequenceMode} onChange={(e) => setSequenceMode(e.target.checked)} className="mt-0.5 w-5 h-5" />
-                    <span>
-                      Numbers look wrong? Ignore the scanned numbers and number every stop 2, 3, 4... in screenshot order (by file name).
-                    </span>
-                  </label>
+                {successCount > 0 && missingNumbers.length > 0 && (
+                  <p className="text-xs text-neutral-300 bg-neutral-900 border border-neutral-700 rounded-lg p-2.5">
+                    Numbers not in these screenshots: {missingNumbers.join(', ')}. Amazon skips numbers sometimes; if a screenshot is missing, add it above.
+                    {duplicateCount > 0 ? ` ${duplicateCount} repeated stop${duplicateCount === 1 ? '' : 's'} will be merged.` : ''}
+                  </p>
                 )}
                 {successCount > 0 && (
                   <button
                     onClick={handleContinue}
                     className="w-full bg-emerald-600 text-white font-bold py-3 rounded-xl min-h-[48px]"
                   >
-                    Continue with {sequenceMode ? okStops.length : totalMergedStops} stop{(sequenceMode ? okStops.length : totalMergedStops) === 1 ? '' : 's'}
+                    Continue with {totalMergedStops} stop{totalMergedStops === 1 ? '' : 's'}
                   </button>
                 )}
               </div>

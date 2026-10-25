@@ -60,86 +60,194 @@ function stripKnownMetadata(text) {
 
 
 /**
- * Layout B: the pin number and "Expected by 8:00 AM" share one header line
- * ("38) © Expected by 8:00 AM 1"), followed by the route code line
- * ("# A.L01.OV"), the street line and the city line. The package count is
- * the digit before the box icon at the end of the header. Returns null when
- * the text does not look like this layout.
- *
- * Misread pin digits (82 for 32, 28 for 26) are repaired: rows in one
- * screenshot are consecutive, so the most common (number - row position)
- * offset wins and outliers are snapped to it.
+ * Header-based layouts (all current Flex itinerary variants):
+ *   "38) © Expected by 8:00 AM 1"            then "# A.L01.OV", street, city
+ *   "(26) © # E-29.1C • Scheduled 5:00 - 10:00 PM", street, [unit], city
+ *   "2" alone, then "# G-1.3A • Deliver by 5:00 PM", street, city, "Deliver 1 package"
+ * A row starts at a header line (has a time or Scheduled/Expected). Each row's
+ * stop number is the EXACT number read for it (header text, a number line above
+ * it, or the separate number-box read passed in as headerNumbers). Numbers are
+ * never guessed: an unreadable number stays null for the driver to fill in. The
+ * only inference is a gap that is fully determined by two certain neighbours
+ * (e.g. 30, ?, 32 -> 31), because Amazon numbers can skip but never repeat.
  */
-const TIME_ANY = /\b\d{1,2}:\d{2}\s*[AP]M\b/i;
+const TIME_LOOSE = /\b\d{1,2}:?\d{2}\s*[AP]M\b/i;
 
-function parseExpectedLayout(lines) {
+export function isHeaderLine(line) {
+  const l = String(line || '').trim();
+  if (!l) return false;
+  if (/deliver\s+\d+\s+packages?/i.test(l)) return false;
+  return TIME_LOOSE.test(l) || /\b(?:scheduled|expected|fxnected)\b/i.test(l);
+}
+
+const IGNORE_LINE = /mailroom|redirects delivery|if needed|navy blue|after you.?re assigned|your itinerary|^(?:am|pm)?\s*today$|^next stop/i;
+const UNIT_START = /^(?:apt|apartment|unit|ste|suite|fl|floor|rm|room|bldg|building|#|\d)/i;
+
+function normTime(h, m, ap) {
+  const hh = parseInt(h, 10);
+  const mm = parseInt(m, 10);
+  if (!(hh >= 1 && hh <= 12) || !(mm >= 0 && mm <= 59)) return null;
+  return { text: `${hh}:${String(mm).padStart(2, '0')}`, ap: ap ? ap.toUpperCase() : null, hh, mm };
+}
+
+function parseWindow(headerLine) {
+  const kw = headerLine.search(/\b(?:scheduled|deliver|expected|fxnected)\b/i);
+  const tail = kw >= 0 ? headerLine.slice(kw) : headerLine.slice(Math.max(0, headerLine.lastIndexOf('#')));
+  const times = [];
+  const re = /\b(\d{1,2}):?(\d{2})\s*([AP]M)?\b/gi;
+  let m;
+  while ((m = re.exec(tail)) !== null) {
+    const t = normTime(m[1], m[2], m[3]);
+    if (t) times.push(t);
+  }
+  if (times.length === 0) return null;
+  const by = /\bb[yv]\b/i.test(tail);
+  if (times.length === 1) {
+    const t = times[0];
+    if (!t.ap) return null; // garbled read, better blank than wrong
+    return `${by ? 'by ' : ''}${t.text} ${t.ap}`;
+  }
+  const [t1, t2] = times;
+  if (t1.text === '12:00' && t1.ap === 'AM' && t2.text === '11:59' && t2.ap === 'PM') return null;
+  const first = t1.ap ? `${t1.text} ${t1.ap}` : t1.text;
+  return `${first} - ${t2.text}${t2.ap ? ` ${t2.ap}` : ''}`;
+}
+
+function parseHeaderLayout(lines, headerNumbers, opts = {}) {
   const headers = [];
   lines.forEach((line, i) => {
-    if (!TIME_ANY.test(line) || /^#/.test(line)) return;
-    const m = line.match(/^\W{0,2}([A-Za-z0-9]{1,3})\s*[\)\]]?\s*\W{0,4}\s/);
-    if (!m) return;
-    const token = m[1];
-    // Letters in the number ("B8" for 38, "a0" for 40) are misreads: the digit
-    // value is unreliable, so the row's number is repaired from its neighbours.
-    const uncertain = /[^0-9OolI]/.test(token);
-    const num = parseInt(token.replace(/[Oo]/g, '0').replace(/[lI]/g, '1').replace(/\D/g, ''), 10);
-    headers.push({ i, num: Number.isInteger(num) && num >= 1 ? num : null, uncertain: uncertain || !(num >= 1), line });
+    if (isHeaderLine(line)) headers.push({ i, line });
   });
-  if (headers.length < 2) return null;
+  if (headers.length === 0) return null;
 
   const rows = [];
   headers.forEach((h, k) => {
+    // Number candidates: leading token on the header line (or a number alone on
+    // the line above) and the separate number-box read. Resolved below.
+    let tokenNum = null;
+    const m = h.line.match(/^\W{0,2}([A-Za-z0-9]{1,3})\s*[\)\]]?(?![:\d])/);
+    if (m && /^\d{1,3}$/.test(m[1])) tokenNum = parseInt(m[1], 10);
+    const prev = lines[h.i - 1];
+    if (tokenNum === null && prev && /^\d{1,3}$/.test(prev.trim())) tokenNum = parseInt(prev.trim(), 10);
+    let boxNum = Array.isArray(headerNumbers) ? headerNumbers[k] : null;
+    if (!Number.isInteger(boxNum) || boxNum < 1) boxNum = null;
+    if (tokenNum !== null && tokenNum < 1) tokenNum = null;
+
     const end = k + 1 < headers.length ? headers[k + 1].i : lines.length;
-    const block = lines.slice(h.i + 1, end).filter((l) => !/^#/.test(l));
+    // The number line above the NEXT header belongs to that header, not this block.
+    const nextHeaderHasNumLineAbove = k + 1 < headers.length && /^\d{1,3}$/.test((lines[end - 1] || '').trim());
+    const block = lines
+      .slice(h.i + 1, nextHeaderHasNumLineAbove ? end - 1 : end)
+      .filter((l) => !/^#/.test(l) && (/^\d+[A-Za-z]?\s+\S+/.test(l) || !IGNORE_LINE.test(l)));
     const streetIdx = block.findIndex((l) => /^\d+[A-Za-z]?\s+\S+/.test(l));
     if (streetIdx === -1) return; // cut off at the screen edge
-    const street = block[streetIdx].replace(/\s+/g, ' ').trim();
-    const cityLine = block.slice(streetIdx + 1).find((l) => /^[A-Za-z][A-Za-z .'\-]{2,}$/.test(l));
-    const afterTime = h.line.slice(h.line.search(TIME_ANY));
-    const pkg = afterTime.match(/[AP]M\s+(\d)\S?\s*$/i);
-    const by = /\bb[yv]\b/i.test(h.line.slice(0, h.line.search(TIME_ANY)));
-    const timeText = (afterTime.match(TIME_ANY) || [''])[0].replace(/\s+/g, ' ');
+    const cityIdx = block.findIndex((l, j) => j > streetIdx && /^[A-Z][A-Z .'\-]{2,}$/.test(l));
+    const between = cityIdx === -1 ? [] : block.slice(streetIdx + 1, cityIdx);
+    let street = block[streetIdx].replace(/\s+/g, ' ').trim();
+    const noteParts = [];
+    between.forEach((l) => {
+      if (UNIT_START.test(l)) street = `${street} ${l.replace(/\s+/g, ' ').trim()}`;
+      else noteParts.push(l.trim());
+    });
+    const city = cityIdx === -1 ? null : block[cityIdx].replace(/\s+/g, ' ').trim();
+    const after = cityIdx === -1 ? [] : block.slice(cityIdx + 1);
+
+    let count = 1;
+    const pkgLine = after.find((l) => /deliver\s+(\d+)\s+packages?/i.test(l)) || lines.slice(h.i + 1, end).find((l) => /deliver\s+(\d+)\s+packages?/i.test(l));
+    if (pkgLine) count = Math.max(1, parseInt(pkgLine.match(/deliver\s+(\d+)\s+packages?/i)[1], 10));
+    else {
+      const t = h.line.match(/[AP]M\W*\s(\d)\S?\s*$/i);
+      if (t) count = Math.max(1, parseInt(t[1], 10));
+    }
+    const tag = after.find((l) => /^(locker|business|signature|leave at door|hand to customer)\b/i.test(l));
+    if (tag) noteParts.push(tag.trim());
+
     rows.push({
       pos: k,
-      num: h.num,
-      uncertain: h.uncertain,
+      tokenNum,
+      boxNum,
+      num: null,
       street,
-      city: cityLine ? cityLine.replace(/\s+/g, ' ').trim() : null,
-      count: pkg ? Math.max(1, parseInt(pkg[1], 10)) : 1,
-      window: timeText ? `${by ? 'by ' : ''}${timeText}` : null
+      city,
+      count,
+      window: parseWindow(h.line),
+      notes: noteParts.length ? noteParts.join('; ') : null
     });
   });
   if (rows.length === 0) return null;
 
-  // Repair misread pin numbers using the consecutive-row offset (rows on one
-  // screenshot are consecutive), counting only rows whose number read cleanly.
-  const counts = new Map();
-  rows.forEach((r) => {
-    if (!r.uncertain && r.num !== null) counts.set(r.num - r.pos, (counts.get(r.num - r.pos) || 0) + 1);
-  });
-  let best = null;
-  counts.forEach((c, off) => {
-    if (!best || c > best.c) best = { off, c };
-  });
-  const certainRows = rows.filter((r) => !r.uncertain && r.num !== null).length;
-  const trusted = best && best.c >= 2 && best.c >= Math.ceil(certainRows / 2);
-  rows.forEach((r) => {
-    if (trusted) {
-      r.num = best.off + r.pos;
-      r.ok = r.num >= 1;
-    } else {
-      r.ok = !r.uncertain && r.num !== null;
+  // Leading row: a block of address lines with no header above it (its header is
+  // clipped off the top edge). It gets its number only from the number box.
+  const firstHeader = headers[0].i;
+  const lead = lines.slice(0, firstHeader).filter((l) => !/^#/.test(l) && (/^\d+[A-Za-z]?\s+\S+/.test(l) || !IGNORE_LINE.test(l)));
+  const lStreet = lead.findIndex((l) => /^\d+[A-Za-z]?\s+\S+/.test(l));
+  if (lStreet !== -1) {
+    const lCity = lead.findIndex((l, j) => j > lStreet && /^[A-Z][A-Z .'\-]{2,}$/.test(l));
+    if (lCity !== -1) {
+      let st = lead[lStreet].replace(/\s+/g, ' ').trim();
+      const notes = [];
+      lead.slice(lStreet + 1, lCity).forEach((l) => {
+        if (UNIT_START.test(l)) st = `${st} ${l.replace(/\s+/g, ' ').trim()}`;
+        else notes.push(l.trim());
+      });
+      const ln = Number.isInteger(opts.leadingNumber) && opts.leadingNumber > 0 ? opts.leadingNumber : null;
+      rows.forEach((r) => {
+        r.pos += 1;
+      });
+      rows.unshift({ pos: 0, tokenNum: null, boxNum: ln, num: null, street: st, city: lead[lCity].replace(/\s+/g, ' ').trim(), count: 1, window: null, notes: notes.length ? notes.join('; ') : null });
     }
+  }
+
+  // Resolve each row's number. Every read (header text, number box) is a candidate.
+  // Numbers on one screenshot rise by at least one per row (gaps allowed; repeats and
+  // backwards steps are not), so pick the set of candidates that keeps the most rows in
+  // that order; on a tie prefer the smaller jumps. Rows left out stay blank.
+  const nodes = [];
+  rows.forEach((r, i) => {
+    [...new Set([r.tokenNum, r.boxNum].filter((v) => v !== null))].forEach((v) => {
+      nodes.push({ row: i, pos: r.pos, num: v, key: v - r.pos });
+    });
   });
+  const dp = nodes.map(() => ({ len: 1, cost: 0, prev: -1 }));
+  for (let x = 0; x < nodes.length; x++) {
+    for (let y = 0; y < x; y++) {
+      const A = nodes[y];
+      const B = nodes[x];
+      if (A.row >= B.row || A.num >= B.num || A.key > B.key) continue;
+      const len = dp[y].len + 1;
+      const cost = dp[y].cost + (B.key - A.key);
+      if (len > dp[x].len || (len === dp[x].len && cost < dp[x].cost)) dp[x] = { len, cost, prev: y };
+    }
+  }
+  if (nodes.length) {
+    let end = 0;
+    dp.forEach((d, x) => {
+      if (d.len > dp[end].len || (d.len === dp[end].len && d.cost < dp[end].cost)) end = x;
+    });
+    for (let x = end; x !== -1; x = dp[x].prev) rows[nodes[x].row].num = nodes[x].num;
+  }
+
+  // Fill a gap only when two certain neighbours fully determine it.
+  const known = rows.filter((r) => r.num !== null);
+  for (let a = 0; a < known.length - 1; a++) {
+    const lo = known[a];
+    const hi = known[a + 1];
+    const between = rows.filter((r) => r.pos > lo.pos && r.pos < hi.pos);
+    if (between.length > 0 && hi.num - lo.num === hi.pos - lo.pos && between.every((r) => r.num === null)) {
+      between.forEach((r) => {
+        r.num = lo.num + (r.pos - lo.pos);
+      });
+    }
+  }
 
   return rows.map((r) => ({
-    stopNumber: r.num ?? 0,
-    numberFromPin: r.ok,
+    stopNumber: r.num,
+    numberFromPin: r.num !== null,
     cityFound: Boolean(r.city),
     address: r.city ? `${r.street}, ${r.city}` : r.street,
     packageCount: r.count,
     deliveryWindow: r.window,
-    notes: null,
+    notes: r.notes,
     needsManualReview: true
   }));
 }
@@ -150,7 +258,7 @@ function parseExpectedLayout(lines) {
  * stop rather than an empty array, so the review screen always has
  * something to start from instead of leaving the driver with nothing.
  */
-export function parseRawOcrText(rawText) {
+export function parseRawOcrText(rawText, opts = {}) {
   if (!rawText || typeof rawText !== 'string') {
     return [emptyStop(2)];
   }
@@ -169,8 +277,8 @@ export function parseRawOcrText(rawText) {
     // Flex sometimes prints the street line twice in a row; keep one.
     .filter((l, i, arr) => i === 0 || l.toLowerCase() !== arr[i - 1].toLowerCase());
 
-  const layoutB = parseExpectedLayout(lines);
-  if (layoutB) return layoutB;
+  const headerRows = parseHeaderLayout(lines, opts.headerNumbers, opts);
+  if (headerRows) return headerRows;
 
   // Bug fix: this used to filter `lines` into `candidateLines` (losing
   // each line's original position), then re-find each one's index via
@@ -285,7 +393,7 @@ export function parseRawOcrText(rawText) {
     const streetPart = addressMatch ? addressMatch[0].trim() : addressLineWithoutMetadata;
 
     return {
-      stopNumber: amazonNumber ?? idx + 2, // stop 1 is the pickup station
+      stopNumber: amazonNumber, // exact read only; null when the pin number was not read
       numberFromPin: amazonNumber !== null,
       cityFound: Boolean(cityLine),
       address: cityLine ? `${streetPart}, ${cityLine}` : streetPart,
